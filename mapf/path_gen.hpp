@@ -54,13 +54,17 @@ namespace detail {
 
 // Time-expanded A* from start to goal. `used[y*W + x]` is how many prior
 // candidates passed through cell (x,y); entering a cell costs
-// 1 + penalty_weight * used-count. Returns the unpadded cell sequence
-// (ending the timestep it reaches goal) or nullopt if goal is
+// 1 + penalty_weight * used-count + reservation[cell]. `reservation` (if
+// non-null, sized W*H) is an externally supplied per-cell extra cost used
+// by the solver to route agents around cells that caused conflicts in an
+// earlier round (reservation-style replanning). Returns the unpadded cell
+// sequence (ending the timestep it reaches goal) or nullopt if goal is
 // unreachable within `horizon` timesteps.
 inline std::optional<std::vector<Cell>> astar_timed(const Grid& grid, Cell start, Cell goal,
                                                     const std::vector<int>& used,
                                                     double penalty_weight, std::size_t horizon,
-                                                    std::mt19937_64& rng) {
+                                                    std::mt19937_64& rng,
+                                                    const std::vector<double>* reservation) {
     const int W = grid.width();
     const int H = grid.height();
     const std::uint64_t layer = static_cast<std::uint64_t>(W) * H;  // cells per timestep
@@ -121,8 +125,9 @@ inline std::optional<std::vector<Cell>> astar_timed(const Grid& grid, Cell start
 
         for (Cell nb : grid.moves_from(cur.cell)) {
             const std::size_t nt = cur.t + 1;
-            const double step = 1.0 + penalty_weight *
-                                          static_cast<double>(used[static_cast<std::size_t>(nb.y) * W + nb.x]);
+            const std::size_t idx = static_cast<std::size_t>(nb.y) * W + nb.x;
+            const double res = reservation ? (*reservation)[idx] : 0.0;
+            const double step = 1.0 + penalty_weight * static_cast<double>(used[idx]) + res;
             const double ng = cur.g + step;
             const std::uint64_t nid = encode(nb, nt);
             auto it = best_g.find(nid);
@@ -139,14 +144,18 @@ inline std::optional<std::vector<Cell>> astar_timed(const Grid& grid, Cell start
 }  // namespace detail
 
 // Generate up to K distinct candidate paths from start to goal. The first
-// is a shortest path; the rest are diversified by penalizing cells used
-// by earlier candidates (with randomized tie-breaking throughout). Fewer
-// than K are returned if the map simply does not offer K distinct routes
-// within the horizon. horizon == 0 selects a generous default.
+// is a shortest path (when there are no reservations); the rest are
+// diversified by penalizing cells used by earlier candidates (with
+// randomized tie-breaking throughout). Fewer than K are returned if the
+// map simply does not offer K distinct routes within the horizon.
+// horizon == 0 selects a generous default. `reservations` (if non-null,
+// sized W*H) biases every candidate away from the listed cells, used by
+// the solver to avoid cells that caused conflicts last round.
 inline std::vector<Candidate> generate_candidates(const Grid& grid, Cell start, Cell goal,
                                                   std::size_t k, std::uint64_t seed,
                                                   double penalty_weight = 1.0,
-                                                  std::size_t horizon = 0) {
+                                                  std::size_t horizon = 0,
+                                                  const std::vector<double>* reservations = nullptr) {
     if (horizon == 0) {
         horizon = 4 * static_cast<std::size_t>(grid.width() + grid.height());
     }
@@ -161,7 +170,7 @@ inline std::vector<Candidate> generate_candidates(const Grid& grid, Cell start, 
     const std::size_t max_attempts = k * 8 + 8;
     for (std::size_t attempt = 0; attempt < max_attempts && out.size() < k; ++attempt) {
         const double weight = out.empty() ? 0.0 : penalty_weight;
-        auto path = detail::astar_timed(grid, start, goal, used, weight, horizon, rng);
+        auto path = detail::astar_timed(grid, start, goal, used, weight, horizon, rng, reservations);
         if (!path) break;  // goal unreachable within horizon
 
         // Penalize interior cells (endpoints are shared by every path, so

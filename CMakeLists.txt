@@ -67,8 +67,18 @@ add_executable(test_conflict_qubo tests/test_conflict_qubo.cpp)
 target_link_libraries(test_conflict_qubo PRIVATE mapf anneal)
 add_test(NAME conflict_qubo COMMAND test_conflict_qubo)
 
+add_executable(test_solver tests/test_solver.cpp)
+target_link_libraries(test_solver PRIVATE mapf anneal)
+add_test(NAME solver COMMAND test_solver)
+
 add_executable(mapf_penalty_experiment src/mapf_penalty_experiment.cpp)
 target_link_libraries(mapf_penalty_experiment PRIVATE mapf anneal)
+
+add_executable(solve_mapf src/solve_mapf.cpp)
+target_link_libraries(solve_mapf PRIVATE mapf anneal)
+
+add_executable(bench_mapf src/bench_mapf.cpp)
+target_link_libraries(bench_mapf PRIVATE mapf anneal)
 
 add_executable(demo_partition src/demo_partition.cpp)
 target_link_libraries(demo_partition PRIVATE anneal)
