@@ -51,9 +51,12 @@ def load_map(path):
 
 
 def load_plan(path):
-    """Return (map_name, paths) where paths[a] is a list of (x, y)."""
+    """Return (map_name, paths, obstacles). Agent lines start with an
+    integer index; obstacle trajectory lines start with the word
+    'obstacle'."""
     map_name = None
     paths = []
+    obstacles = []
     with open(path) as f:
         for ln in f:
             ln = ln.strip()
@@ -62,17 +65,18 @@ def load_plan(path):
             parts = ln.split()
             if parts[0] == "map":
                 map_name = parts[1]
-            elif parts[0] in ("agents", "makespan"):
+            elif parts[0] in ("agents", "makespan", "obstacles"):
                 continue
+            elif parts[0] == "obstacle":
+                obstacles.append([tuple(map(int, tok.split(","))) for tok in parts[1:]])
             else:
                 # "<agent> x0,y0 x1,y1 ..."
-                cells = [tuple(map(int, tok.split(","))) for tok in parts[1:]]
-                paths.append(cells)
-    return map_name, paths
+                paths.append([tuple(map(int, tok.split(","))) for tok in parts[1:]])
+    return map_name, paths, obstacles
 
 
 def render(plan_file, map_path, out_path, fps, cell_px):
-    map_name, paths = load_plan(plan_file)
+    map_name, paths, obstacles = load_plan(plan_file)
     if map_path is None:
         map_path = map_name
     width, height, blocked = load_map(map_path)
@@ -83,6 +87,10 @@ def render(plan_file, map_path, out_path, fps, cell_px):
 
     def pos(a, t):  # park on final cell after the path ends
         p = paths[a]
+        return p[t] if t < len(p) else p[-1]
+
+    def obs_pos(o, t):
+        p = obstacles[o]
         return p[t] if t < len(p) else p[-1]
 
     fig, ax = plt.subplots(figsize=(width * cell_px / 100.0, height * cell_px / 100.0))
@@ -105,6 +113,16 @@ def render(plan_file, map_path, out_path, fps, cell_px):
         ax.plot(gx + 0.5, gy + 0.5, marker="x", color=colors[a], markersize=8,
                 markeredgewidth=2)
 
+    # Moving obstacles: dark squares redrawn each frame (via a Rectangle
+    # per obstacle whose position is updated in update()).
+    from matplotlib.patches import Rectangle
+    obstacle_patches = []
+    for o in range(len(obstacles)):
+        ox, oy = obs_pos(o, 0)
+        rect = Rectangle((ox + 0.1, oy + 0.1), 0.8, 0.8, color="#c92a2a", zorder=2)
+        ax.add_patch(rect)
+        obstacle_patches.append(rect)
+
     # Agent dots, updated each frame.
     scatter = ax.scatter(
         [pos(a, 0)[0] + 0.5 for a in range(n_agents)],
@@ -117,6 +135,9 @@ def render(plan_file, map_path, out_path, fps, cell_px):
         scatter.set_offsets(
             [[pos(a, t)[0] + 0.5, pos(a, t)[1] + 0.5] for a in range(n_agents)]
         )
+        for o, rect in enumerate(obstacle_patches):
+            ox, oy = obs_pos(o, t)
+            rect.set_xy((ox + 0.1, oy + 0.1))
         title.set_text(f"t = {t} / {makespan}")
         return scatter, title
 

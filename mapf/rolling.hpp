@@ -66,9 +66,31 @@ struct RollingConfig {
 struct RollingResult {
     Plan history;                 // execution history: history.paths[a][t]
     std::size_t steps = 0;        // global timesteps simulated
+    std::size_t cycles = 0;       // replan cycles run (for cycle-time metrics)
     std::size_t goals_reached = 0;
+    std::size_t obstacle_hits = 0;  // agent-on-obstacle overlaps (0 with perfect prediction)
     bool all_done = false;        // one-shot: every agent ended on its goal
     double wall_ms = 0.0;
+};
+
+// Moving obstacles. Each obstacle has a true trajectory (its actual cell at
+// each global timestep); the planner sees a PREDICTION of that, which may be
+// exact (perfect_prediction) or, for genuinely unpredictable movers, a ball
+// around the current position that grows with look-ahead (prediction_radius
+// as the base uncertainty). Predicted cells are forbidden in candidate
+// generation; when a prediction is nonetheless violated at execution time
+// the affected agent brakes (see the driver). This models the robot-soccer
+// setting: teammates and the ball move on their own and must be dodged.
+struct ObstacleModel {
+    std::vector<std::vector<Cell>> paths;  // paths[o][t] = obstacle o's true cell at time t
+    int prediction_radius = 0;             // safety margin / base uncertainty (cells)
+    bool perfect_prediction = true;        // predict the true future vs a growing ball
+
+    std::size_t count() const { return paths.size(); }
+    Cell at(std::size_t o, std::size_t t) const {
+        const auto& p = paths[o];
+        return p.empty() ? Cell{-1, -1} : (t < p.size() ? p[t] : p.back());
+    }
 };
 
 // Lifelong goal source: called when agent `a` reaches its goal, returns its
@@ -94,12 +116,48 @@ inline bool step_ok(const std::vector<Cell>& prev, const std::vector<Cell>& cur)
     return true;
 }
 
+// Predicted obstacle occupancy for relative timesteps 0..window, as a
+// [k][cell] boolean grid the time-expanded A* can forbid. With perfect
+// prediction each obstacle's cell is read from its true future; otherwise
+// it is a ball around the obstacle's current cell whose radius grows with
+// look-ahead k (uncertainty compounds the further we predict).
+inline std::vector<std::vector<char>> predict_occupancy(const Grid& grid,
+                                                        const ObstacleModel& obs,
+                                                        std::size_t global_t,
+                                                        std::size_t window) {
+    const int W = grid.width();
+    std::vector<std::vector<char>> occ(window + 1,
+                                       std::vector<char>(static_cast<std::size_t>(W) * grid.height(), 0));
+    for (std::size_t o = 0; o < obs.count(); ++o) {
+        for (std::size_t k = 0; k <= window; ++k) {
+            const Cell c = obs.perfect_prediction ? obs.at(o, global_t + k) : obs.at(o, global_t);
+            const int r = obs.perfect_prediction ? obs.prediction_radius
+                                                 : obs.prediction_radius + static_cast<int>(k);
+            for (int dy = -r; dy <= r; ++dy) {
+                for (int dx = -r; dx <= r; ++dx) {
+                    if (grid.in_bounds(c.x + dx, c.y + dy)) {
+                        occ[k][static_cast<std::size_t>(c.y + dy) * W + (c.x + dx)] = 1;
+                    }
+                }
+            }
+        }
+    }
+    return occ;
+}
+
+inline bool obstacle_on(const ObstacleModel& obs, std::size_t global_t, Cell c) {
+    for (std::size_t o = 0; o < obs.count(); ++o)
+        if (obs.at(o, global_t) == c) return true;
+    return false;
+}
+
 }  // namespace detail
 
 inline RollingResult simulate_rolling(const Grid& grid, const std::vector<Cell>& starts,
                                       const std::vector<Cell>& goals_in,
                                       const RollingConfig& cfg,
-                                      const GoalProvider& provider = {}) {
+                                      const GoalProvider& provider = {},
+                                      const ObstacleModel* obstacles = nullptr) {
     const auto start_time = std::chrono::steady_clock::now();
     const std::size_t n = starts.size();
     const bool lifelong = static_cast<bool>(provider);
@@ -121,11 +179,22 @@ inline RollingResult simulate_rolling(const Grid& grid, const std::vector<Cell>&
             break;
         }
 
+        const std::size_t clock = result.steps;  // global time at cycle start
+
+        // Predicted obstacle occupancy over this cycle's window, forbidden
+        // during candidate generation so paths route (or wait) around it.
+        std::vector<std::vector<char>> occ;
+        const std::vector<std::vector<char>>* occ_ptr = nullptr;
+        if (obstacles && obstacles->count() > 0) {
+            occ = detail::predict_occupancy(grid, *obstacles, clock, cfg.window);
+            occ_ptr = &occ;
+        }
+
         // 1. Candidate menu from current positions to current goals.
         std::vector<std::vector<Candidate>> pools(n);
         for (std::size_t a = 0; a < n; ++a) {
             pools[a] = generate_candidates(grid, cur[a], goals[a], cfg.candidates_per_agent,
-                                           cfg.seed + a + cycle * 100003);
+                                           cfg.seed + a + cycle * 100003, 1.0, 0, nullptr, occ_ptr);
             if (pools[a].empty()) pools[a].push_back(Candidate{{cur[a]}, 0.0});  // stuck: wait
         }
 
@@ -142,20 +211,57 @@ inline RollingResult simulate_rolling(const Grid& grid, const std::vector<Cell>&
         for (std::size_t a = 0; a < n; ++a) chosen[a] = pools[a][decoded.chosen[a]].path;
 
         // 3. Commit the longest conflict-free prefix of the window, up to E.
+        // Each committed step is validated directly (never trusting the
+        // annealer) against BOTH other agents and the obstacles' true
+        // positions. Safety rule: if a prediction was wrong and an agent's
+        // planned move would enter (or swap through) an obstacle, that agent
+        // brakes -- it holds its previous cell for this step.
         std::size_t committed = 0;
         std::vector<Cell> prev = cur;
         for (std::size_t e = 1; e <= cfg.execute; ++e) {
+            const std::size_t gt = clock + e;  // global time of this step
             std::vector<Cell> next(n);
             for (std::size_t a = 0; a < n; ++a) next[a] = detail::path_at(chosen[a], e);
-            if (!detail::step_ok(prev, next)) break;
-            for (std::size_t a = 0; a < n; ++a) result.history.paths[a].push_back(next[a]);
+
+            if (obstacles && obstacles->count() > 0) {
+                for (std::size_t a = 0; a < n; ++a) {
+                    bool vertex = detail::obstacle_on(*obstacles, gt, next[a]);
+                    bool swap = false;
+                    for (std::size_t o = 0; o < obstacles->count(); ++o) {
+                        if (obstacles->at(o, gt) == prev[a] && obstacles->at(o, gt - 1) == next[a]) {
+                            swap = true;
+                            break;
+                        }
+                    }
+                    if (vertex || swap) next[a] = prev[a];  // brake: hold position
+                }
+            }
+
+            if (!detail::step_ok(prev, next)) break;  // residual agent-agent conflict
+            for (std::size_t a = 0; a < n; ++a) {
+                result.history.paths[a].push_back(next[a]);
+                // Count an overlap only an obstacle could still cause (it
+                // moved onto a braked/held agent). Zero under perfect
+                // prediction; a metric of prediction quality otherwise.
+                if (obstacles && obstacles->count() > 0 &&
+                    detail::obstacle_on(*obstacles, gt, next[a])) {
+                    result.obstacle_hits += 1;
+                }
+            }
             prev = next;
             ++committed;
         }
         if (committed == 0) {
             // Even the first planned step collides: hold position one step
-            // (always safe -- nobody moves) so the clock still advances.
-            for (std::size_t a = 0; a < n; ++a) result.history.paths[a].push_back(cur[a]);
+            // (always safe against other agents -- nobody moves) so the
+            // clock still advances.
+            for (std::size_t a = 0; a < n; ++a) {
+                result.history.paths[a].push_back(cur[a]);
+                if (obstacles && obstacles->count() > 0 &&
+                    detail::obstacle_on(*obstacles, clock + 1, cur[a])) {
+                    result.obstacle_hits += 1;
+                }
+            }
             result.steps += 1;
         } else {
             cur = prev;
@@ -174,6 +280,7 @@ inline RollingResult simulate_rolling(const Grid& grid, const std::vector<Cell>&
             }
         }
         ++cycle;
+        result.cycles = cycle;
     }
 
     result.wall_ms =

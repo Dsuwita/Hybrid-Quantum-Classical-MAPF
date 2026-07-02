@@ -75,6 +75,10 @@ add_executable(test_rolling tests/test_rolling.cpp)
 target_link_libraries(test_rolling PRIVATE mapf anneal)
 add_test(NAME rolling COMMAND test_rolling)
 
+add_executable(test_obstacles tests/test_obstacles.cpp)
+target_link_libraries(test_obstacles PRIVATE mapf anneal)
+add_test(NAME obstacles COMMAND test_obstacles)
+
 add_executable(mapf_penalty_experiment src/mapf_penalty_experiment.cpp)
 target_link_libraries(mapf_penalty_experiment PRIVATE mapf anneal)
 
@@ -87,6 +91,9 @@ target_link_libraries(bench_mapf PRIVATE mapf anneal)
 add_executable(demo_rolling src/demo_rolling.cpp)
 target_link_libraries(demo_rolling PRIVATE mapf anneal)
 
+add_executable(demo_obstacles src/demo_obstacles.cpp)
+target_link_libraries(demo_obstacles PRIVATE mapf anneal)
+
 add_executable(demo_partition src/demo_partition.cpp)
 target_link_libraries(demo_partition PRIVATE anneal)
 
@@ -95,3 +102,6 @@ target_link_libraries(bench_throughput PRIVATE anneal)
 
 add_executable(bench_scaling src/bench_scaling.cpp)
 target_link_libraries(bench_scaling PRIVATE anneal)
+
+add_executable(bench_rolling src/bench_rolling.cpp)
+target_link_libraries(bench_rolling PRIVATE mapf anneal)

@@ -111,6 +111,29 @@ python3 mapf/viz/render_plan.py plan.txt --out lifelong.gif
 
 ![eight agents replanning continuously in lifelong mode](mapf/viz/demo_lifelong.gif)
 
+### Moving obstacles
+
+The last piece is other things that move on their own. This is the
+robot-soccer setting that motivates the whole project: a robot has to get
+to a spot on the field while teammates, opponents, and the ball move
+independently. Obstacles carry a predicted occupancy over the planning
+window (exact for scripted movers, or a ball around the current cell that
+grows with look-ahead when motion is uncertain), and those predicted
+cells are forbidden in candidate generation, so the time-expanded A*
+either routes around a mover or waits for it to pass. If a prediction is
+violated at execution time, the affected agent brakes (holds) for that
+step. `demo_obstacles` sends three agents across a field past two
+patrolling obstacles; with perfect prediction and room to move they reach
+their goals with zero collisions of either kind:
+
+![agents dodging two patrolling obstacles](mapf/viz/demo_obstacles.gif)
+
+Replan cycle time and throughput as the field fills up are in
+`mapf/bench/rolling.md` (about 5 ms per cycle at 2 agents, 40 ms at 32).
+Agent-agent safety is unconditional; agent-obstacle avoidance is
+guaranteed with perfect prediction as long as agents are free to move, and
+degrades gracefully (reported, not hidden) under heavy congestion.
+
 Solve a scenario yourself:
 
 ```

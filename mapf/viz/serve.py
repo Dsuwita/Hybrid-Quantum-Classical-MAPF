@@ -103,7 +103,7 @@ def parse_plan_text(text):
         if not ln or ln.startswith("#"):
             continue
         p = ln.split()
-        if p[0] in ("map", "agents", "makespan"):
+        if p[0] in ("map", "agents", "makespan", "obstacles", "obstacle"):
             continue
         paths.append([[int(v) for v in tok.split(",")] for tok in p[1:]])
     return paths
