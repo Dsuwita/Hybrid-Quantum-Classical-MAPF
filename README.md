@@ -35,6 +35,29 @@ std::vector<std::int8_t> state = {+1, -1, +1};
 double e = bqm.energy(state);  // -1.0, the ground state: 2 of 3 edges cut
 ```
 
+## Max-Cut on Gset benchmarks
+
+The annealer's quality is measured on the standard Gset Max-Cut instances.
+Each graph maps to an Ising model (edge (u,v,w) becomes interaction
+J_uv = +w); the cut is recounted independently from the edge list, never
+trusted from the energy. Best-known values are the published bests
+(Benlic & Hao, Engineering Applications of AI, 2013).
+
+| instance | nodes | best-known | our cut | percent | wall |
+|---|---|---|---|---|---|
+| G1  |  800 | 11624 | 11624 | 100.00% | 0.5 s |
+| G22 | 2000 | 13359 | 13358 |  99.99% | 1.2 s |
+| G39 | 2000 |  2408 |  2399 |  99.63% | 1.7 s |
+| G55 | 5000 | 10294 | 10291 |  99.97% | 3.2 s |
+
+16 replicas x 20000 sweeps, seed 1, on a Ryzen 5 7600. Reproduce with
+`./data/download_gset.sh` then `./bench/run_maxcut.sh`; details and the
+brute-force correctness tests are in `bench/maxcut.md`.
+
+```
+./build/solve_maxcut data/gset/G1 --best 11624 --replicas 16 --sweeps 20000
+```
+
 ## Multi-Agent Path Finding (Project 2)
 
 The downstream application: route many agents across a grid to their

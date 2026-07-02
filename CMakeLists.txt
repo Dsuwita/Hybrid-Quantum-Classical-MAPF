@@ -94,6 +94,10 @@ target_link_libraries(demo_rolling PRIVATE mapf anneal)
 add_executable(demo_obstacles src/demo_obstacles.cpp)
 target_link_libraries(demo_obstacles PRIVATE mapf anneal)
 
+add_executable(test_problems tests/test_problems.cpp)
+target_link_libraries(test_problems PRIVATE anneal)
+add_test(NAME problems COMMAND test_problems)
+
 add_executable(demo_partition src/demo_partition.cpp)
 target_link_libraries(demo_partition PRIVATE anneal)
 
@@ -105,3 +109,6 @@ target_link_libraries(bench_scaling PRIVATE anneal)
 
 add_executable(bench_rolling src/bench_rolling.cpp)
 target_link_libraries(bench_rolling PRIVATE mapf anneal)
+
+add_executable(solve_maxcut src/solve_maxcut.cpp)
+target_link_libraries(solve_maxcut PRIVATE anneal)
