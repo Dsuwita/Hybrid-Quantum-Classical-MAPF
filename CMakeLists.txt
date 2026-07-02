@@ -44,6 +44,19 @@ add_executable(test_parallel tests/test_parallel.cpp)
 target_link_libraries(test_parallel PRIVATE anneal)
 add_test(NAME parallel COMMAND test_parallel)
 
+# MAPF (project 2): header-only, lives under mapf/, includes as "mapf/...".
+add_library(mapf INTERFACE)
+target_include_directories(mapf INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})
+
+add_executable(test_mapf_io tests/test_mapf_io.cpp)
+target_link_libraries(test_mapf_io PRIVATE mapf)
+target_compile_definitions(test_mapf_io PRIVATE TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/data")
+add_test(NAME mapf_io COMMAND test_mapf_io)
+
+add_executable(test_verifier tests/test_verifier.cpp)
+target_link_libraries(test_verifier PRIVATE mapf)
+add_test(NAME verifier COMMAND test_verifier)
+
 add_executable(demo_partition src/demo_partition.cpp)
 target_link_libraries(demo_partition PRIVATE anneal)
 
