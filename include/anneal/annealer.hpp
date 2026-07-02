@@ -27,6 +27,7 @@
 #pragma once
 
 #include "anneal/bqm.hpp"
+#include "anneal/rng.hpp"
 
 #include <cmath>
 #include <cstddef>
@@ -60,7 +61,11 @@ public:
         }
     }
 
-    SolveResult solve() {
+    // decision_log, if non-null, records one byte per proposed flip
+    // (1 = accepted, 0 = rejected) in proposal order. Used by the
+    // Milestone 3 differential test to check that the optimized annealer
+    // makes bit-identical accept/reject decisions to this naive one.
+    SolveResult solve(std::vector<std::uint8_t>* decision_log = nullptr) {
         std::size_t n = bqm_.num_variables();
         std::vector<std::int8_t> state(n);
 
@@ -72,8 +77,6 @@ public:
         double current_energy = bqm_.energy(state);
         std::vector<std::int8_t> best_state = state;
         double best_energy = current_energy;
-
-        std::uniform_real_distribution<double> unif(0.0, 1.0);
 
         for (std::size_t sweep = 0; sweep < num_sweeps_; ++sweep) {
             double t = schedule_.temperature(sweep);
@@ -89,7 +92,8 @@ public:
                 }
                 double d_energy = -2.0 * static_cast<double>(state[i]) * field;
 
-                bool accept = (d_energy <= 0.0) || (unif(rng_) < std::exp(-d_energy / t));
+                bool accept = (d_energy <= 0.0) || (uniform01(rng_) < std::exp(-d_energy / t));
+                if (decision_log) decision_log->push_back(accept ? 1 : 0);
                 if (accept) {
                     state[i] = static_cast<std::int8_t>(-state[i]);
                     current_energy += d_energy;
