@@ -55,6 +55,7 @@
 #include "anneal/bqm.hpp"
 #include "anneal/rng.hpp"
 
+#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -168,12 +169,18 @@ class FastAnnealer {
 
 public:
     // Standalone use: build (and own) the compact view from a BQM.
-    FastAnnealer(const BQM& bqm, Schedule schedule, std::size_t num_sweeps, std::uint64_t seed)
+    // max_wall_ms > 0 turns this into an ANYTIME solver: it stops after
+    // that many milliseconds of wall time and returns the best state seen
+    // so far, even if num_sweeps has not been reached. Used by the rolling-
+    // horizon MAPF driver, which must respond within a per-cycle deadline.
+    FastAnnealer(const BQM& bqm, Schedule schedule, std::size_t num_sweeps, std::uint64_t seed,
+                 double max_wall_ms = 0.0)
         : owned_view_(std::make_shared<const CompactBQM>(bqm)),
           view_(owned_view_.get()),
           schedule_(schedule),
           num_sweeps_(num_sweeps),
-          rng_(seed) {
+          rng_(seed),
+          max_wall_ms_(max_wall_ms) {
         allocate_accept_table();
     }
 
@@ -181,8 +188,12 @@ public:
     // outlives this annealer. The view is strictly read-only here, so any
     // number of annealers on any threads may share one.
     FastAnnealer(const CompactBQM& view, Schedule schedule, std::size_t num_sweeps,
-                 std::uint64_t seed)
-        : view_(&view), schedule_(schedule), num_sweeps_(num_sweeps), rng_(seed) {
+                 std::uint64_t seed, double max_wall_ms = 0.0)
+        : view_(&view),
+          schedule_(schedule),
+          num_sweeps_(num_sweeps),
+          rng_(seed),
+          max_wall_ms_(max_wall_ms) {
         allocate_accept_table();
     }
 
@@ -278,7 +289,18 @@ private:
         [[maybe_unused]] double* const table = accept_table_.data();
         [[maybe_unused]] const std::size_t table_size = accept_table_.size();
 
+        // Anytime deadline (max_wall_ms_ > 0): checked once per sweep, which
+        // is negligible next to a sweep's n proposals. best_state/best_energy
+        // are always current, so stopping early just returns the best found.
+        const auto solve_start = std::chrono::steady_clock::now();
+
         for (std::size_t sweep = 0; sweep < num_sweeps_; ++sweep) {
+            if (max_wall_ms_ > 0.0) {
+                const double elapsed = std::chrono::duration<double, std::milli>(
+                                           std::chrono::steady_clock::now() - solve_start)
+                                           .count();
+                if (elapsed >= max_wall_ms_) break;
+            }
             const double t = schedule_.temperature(sweep);
 
             // Level 4: refresh the acceptance table for this sweep's
@@ -372,6 +394,7 @@ private:
     Schedule schedule_;
     std::size_t num_sweeps_;
     Rng rng_;
+    double max_wall_ms_ = 0.0;  // 0 = run all sweeps; >0 = anytime deadline
 };
 
 }  // namespace anneal

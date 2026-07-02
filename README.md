@@ -85,6 +85,32 @@ goal.
 Regenerate the demo plans and GIFs with `./mapf/viz/make_demos.sh` (needs
 the project built and Python with matplotlib).
 
+## Real-time replanning (Project 3)
+
+The static solver plans every path once up front. Real deployments cannot:
+agents keep getting new tasks and the world keeps changing. The
+rolling-horizon driver (`mapf/rolling.hpp`, RHCR-style after Li et al.,
+AAAI 2021) replans continuously under a global clock. Each cycle it plans
+a window of W timesteps from the agents' current positions, resolves
+conflicts only within that window (a small QUBO), commits the first E < W
+steps, and looks again. The annealer runs under a per-cycle wall-clock
+deadline and returns its best-so-far when time is up (anytime use). In
+lifelong mode an agent that reaches its goal is immediately handed a new
+one, so the agents never stop.
+
+The committed history is always collision-free (each cycle commits only
+the longest conflict-free prefix it verified, and falls back to holding
+position if even the first step would collide); throughput is what
+degrades under congestion, and it is reported honestly. This GIF is eight
+agents running lifelong on a 16x16 grid, produced by `demo_rolling`:
+
+```
+./build/demo_rolling mapf/bench/maps/empty16.map 8 --steps 80 --out plan.txt
+python3 mapf/viz/render_plan.py plan.txt --out lifelong.gif
+```
+
+![eight agents replanning continuously in lifelong mode](mapf/viz/demo_lifelong.gif)
+
 Solve a scenario yourself:
 
 ```

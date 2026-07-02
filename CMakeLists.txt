@@ -71,6 +71,10 @@ add_executable(test_solver tests/test_solver.cpp)
 target_link_libraries(test_solver PRIVATE mapf anneal)
 add_test(NAME solver COMMAND test_solver)
 
+add_executable(test_rolling tests/test_rolling.cpp)
+target_link_libraries(test_rolling PRIVATE mapf anneal)
+add_test(NAME rolling COMMAND test_rolling)
+
 add_executable(mapf_penalty_experiment src/mapf_penalty_experiment.cpp)
 target_link_libraries(mapf_penalty_experiment PRIVATE mapf anneal)
 
@@ -79,6 +83,9 @@ target_link_libraries(solve_mapf PRIVATE mapf anneal)
 
 add_executable(bench_mapf src/bench_mapf.cpp)
 target_link_libraries(bench_mapf PRIVATE mapf anneal)
+
+add_executable(demo_rolling src/demo_rolling.cpp)
+target_link_libraries(demo_rolling PRIVATE mapf anneal)
 
 add_executable(demo_partition src/demo_partition.cpp)
 target_link_libraries(demo_partition PRIVATE anneal)

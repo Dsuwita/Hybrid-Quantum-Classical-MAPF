@@ -66,12 +66,20 @@ namespace mapf {
 // same cell at the same time. Swap conflict: the two exchange cells across
 // one step. Same logic as the verifier's pairwise loop, specialized to a
 // single pair of raw paths.
-inline bool paths_conflict(const std::vector<Cell>& a, const std::vector<Cell>& b) {
+//
+// window caps how far ahead conflicts are considered. The full-path check
+// (the default, SIZE_MAX) is what the static solver wants; the rolling-
+// horizon driver passes a small window so it only resolves conflicts
+// within the timesteps it is about to commit, keeping each cycle's QUBO
+// small.
+inline bool paths_conflict(const std::vector<Cell>& a, const std::vector<Cell>& b,
+                           std::size_t window = static_cast<std::size_t>(-1)) {
     if (a.empty() || b.empty()) return false;
     auto at = [](const std::vector<Cell>& p, std::size_t t) {
         return t < p.size() ? p[t] : p.back();
     };
-    const std::size_t horizon = std::max(a.size(), b.size()) - 1;
+    std::size_t horizon = std::max(a.size(), b.size()) - 1;
+    if (window < horizon) horizon = window;
     for (std::size_t t = 0; t <= horizon; ++t) {
         Cell pa = at(a, t), pb = at(b, t);
         if (pa == pb) return true;  // vertex conflict
@@ -111,9 +119,12 @@ inline double default_penalty(const std::vector<std::vector<Candidate>>& pools) 
 
 // Build the path-selection QUBO. pools[a] is agent a's candidate menu.
 // P is the conflict penalty, P1 the one-hot penalty; pass <= 0 to use the
-// safe default for that weight.
+// safe default for that weight. window limits how far ahead conflicts are
+// scored (default: whole path); the rolling-horizon driver passes a small
+// window.
 inline SelectionQubo build_selection_qubo(const std::vector<std::vector<Candidate>>& pools,
-                                          double P = -1.0, double P1 = -1.0) {
+                                          double P = -1.0, double P1 = -1.0,
+                                          std::size_t window = static_cast<std::size_t>(-1)) {
     const double penalty = (P > 0.0) ? P : default_penalty(pools);
     const double onehot = (P1 > 0.0) ? P1 : default_penalty(pools);
 
@@ -154,7 +165,7 @@ inline SelectionQubo build_selection_qubo(const std::vector<std::vector<Candidat
         for (std::size_t b = a + 1; b < pools.size(); ++b) {
             for (std::size_t i = 0; i < pools[a].size(); ++i) {
                 for (std::size_t j = 0; j < pools[b].size(); ++j) {
-                    if (paths_conflict(pools[a][i].path, pools[b][j].path)) {
+                    if (paths_conflict(pools[a][i].path, pools[b][j].path, window)) {
                         bqm.add_interaction(model.var_index[a][i], model.var_index[b][j], penalty);
                         ++model.num_conflict_edges;
                     }

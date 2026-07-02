@@ -23,6 +23,7 @@
 #include <vector>
 
 #include "mapf/grid.hpp"
+#include "mapf/plan_io.hpp"
 #include "mapf/scenario.hpp"
 #include "mapf/solver.hpp"
 #include "mapf/verifier.hpp"
@@ -30,23 +31,6 @@
 using namespace mapf;
 
 namespace {
-
-void write_plan(const std::string& path, const std::string& map_name, const Plan& plan) {
-    std::ofstream out(path);
-    if (!out) {
-        std::fprintf(stderr, "warning: cannot open %s for writing\n", path.c_str());
-        return;
-    }
-    out << "# mapf plan\n";
-    out << "map " << map_name << "\n";
-    out << "agents " << plan.num_agents() << "\n";
-    out << "makespan " << plan.makespan() << "\n";
-    for (std::size_t a = 0; a < plan.num_agents(); ++a) {
-        out << a;
-        for (const Cell& c : plan.paths[a]) out << " " << c.x << "," << c.y;
-        out << "\n";
-    }
-}
 
 long arg_value(int argc, char** argv, const char* flag, long fallback) {
     for (int i = 1; i + 1 < argc; ++i) {
@@ -109,8 +93,10 @@ int main(int argc, char** argv) {
 
     const char* out_path = arg_string(argc, argv, "--out", nullptr);
     if (out_path) {
-        write_plan(out_path, map_path, r.plan);
-        std::printf("plan written   %s\n", out_path);
+        if (write_plan(out_path, map_path, r.plan))
+            std::printf("plan written   %s\n", out_path);
+        else
+            std::fprintf(stderr, "warning: cannot open %s for writing\n", out_path);
     }
 
     return r.success ? 0 : 1;
