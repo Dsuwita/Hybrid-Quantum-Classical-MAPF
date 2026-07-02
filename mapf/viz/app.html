@@ -1,0 +1,438 @@
+<!DOCTYPE html>
+<!--
+  Interactive MAPF GUI (front end for serve.py).
+
+  Edit a grid (place agents, toggle obstacles), press Solve to run the
+  real compiled solver on the server, then play/scrub/step the returned
+  plan on the canvas. Plain HTML + canvas + fetch; no build step. Served
+  at / by serve.py, which also provides the /api endpoints this calls.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>MAPF studio</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: system-ui, sans-serif; background: #14161a; color: #e6e8eb; }
+  header { padding: 12px 20px; border-bottom: 1px solid #2b303b; }
+  header h1 { margin: 0; font-size: 17px; }
+  header span { color: #7f8794; font-size: 12px; }
+  main { display: flex; gap: 18px; padding: 18px; align-items: flex-start; flex-wrap: wrap; }
+  #stage { background: #1c1f26; border-radius: 10px; padding: 12px; }
+  canvas { display: block; background: #0f1115; border-radius: 6px; cursor: crosshair; }
+  aside { width: 320px; display: flex; flex-direction: column; gap: 14px; }
+  .panel { background: #1c1f26; border: 1px solid #2b303b; border-radius: 10px; padding: 12px 14px; }
+  .panel h2 { margin: 0 0 8px; font-size: 13px; text-transform: uppercase;
+              letter-spacing: .04em; color: #8b93a0; }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  button, select, input[type=number] {
+    background: #2b303b; color: #e6e8eb; border: 1px solid #3a4150; border-radius: 6px;
+    padding: 6px 10px; font-size: 13px;
+  }
+  button { cursor: pointer; }
+  button:hover:not(:disabled) { background: #353b48; }
+  button:disabled { opacity: .4; cursor: default; }
+  button.active { background: #3b5bdb; border-color: #3b5bdb; }
+  button.primary { background: #2f9e44; border-color: #2f9e44; font-weight: 600; }
+  button.primary:hover:not(:disabled) { background: #37b24d; }
+  label.mini { font-size: 12px; color: #aab2bd; display: flex; flex-direction: column; gap: 3px; }
+  input[type=number] { width: 78px; }
+  input[type=range] { width: 100%; }
+  .agents { display: flex; flex-direction: column; gap: 5px; max-height: 150px; overflow-y: auto; }
+  .agent { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+  .swatch { width: 12px; height: 12px; border-radius: 3px; flex: none; }
+  .agent button { padding: 1px 7px; font-size: 12px; }
+  .metrics { font-size: 13px; line-height: 1.7; }
+  .metrics b { color: #fff; }
+  .ok { color: #51cf66; } .bad { color: #ff6b6b; }
+  #status { font-size: 12px; color: #aab2bd; min-height: 16px; }
+  .hint { font-size: 12px; color: #7f8794; }
+</style>
+</head>
+<body>
+  <header>
+    <h1>MAPF studio</h1>
+    <span>edit a grid, solve it with the annealer, and play the result</span>
+  </header>
+
+  <main>
+    <div id="stage">
+      <canvas id="canvas" width="560" height="560"></canvas>
+      <div class="row" style="margin-top:10px; justify-content:center">
+        <button id="toStart" disabled>&#9198;</button>
+        <button id="stepBack" disabled>&#9664;</button>
+        <button id="play" disabled>&#9654;</button>
+        <button id="stepFwd" disabled>&#9654;&#9654;</button>
+        <button id="toEnd" disabled>&#9197;</button>
+        <label class="mini" style="flex-direction:row; align-items:center; gap:5px">
+          <input type="checkbox" id="loop" checked /> loop
+        </label>
+      </div>
+      <div class="row" style="margin-top:8px; justify-content:center">
+        <span class="hint">t</span>
+        <input type="range" id="scrub" min="0" max="0" step="0.02" value="0"
+               style="width:360px" disabled />
+        <span id="tlabel" class="hint" style="min-width:64px">-</span>
+      </div>
+    </div>
+
+    <aside>
+      <div class="panel">
+        <h2>Scenario</h2>
+        <div class="row">
+          <button data-example="crossing">Crossing demo</button>
+          <button data-example="rooms">Rooms demo</button>
+        </div>
+        <div class="row" style="margin-top:8px">
+          <select id="mapSelect"><option value="">-- load a map --</option></select>
+          <button id="loadMap">Load</button>
+        </div>
+        <div class="row" style="margin-top:8px">
+          <label class="mini">width <input type="number" id="newW" value="12" min="2" max="60"></label>
+          <label class="mini">height <input type="number" id="newH" value="12" min="2" max="60"></label>
+          <button id="blank">Blank grid</button>
+        </div>
+      </div>
+
+      <div class="panel">
+        <h2>Edit tool</h2>
+        <div class="row">
+          <button class="tool active" data-tool="agent">Add agent</button>
+          <button class="tool" data-tool="obstacle">Obstacle</button>
+          <button class="tool" data-tool="erase">Remove agent</button>
+        </div>
+        <div class="hint" style="margin-top:8px" id="toolHint">
+          Click a cell for the start, then another for the goal.
+        </div>
+      </div>
+
+      <div class="panel">
+        <h2>Agents (<span id="agentCount">0</span>)</h2>
+        <div class="agents" id="agentList"></div>
+        <div class="row" style="margin-top:8px">
+          <button id="clearAgents">Clear all</button>
+        </div>
+      </div>
+
+      <div class="panel">
+        <h2>Annealer budget</h2>
+        <div class="row">
+          <label class="mini">sweeps <input type="number" id="sweeps" value="3000" min="1" max="200000"></label>
+          <label class="mini">replicas <input type="number" id="replicas" value="12" min="1" max="64"></label>
+        </div>
+        <div class="row" style="margin-top:8px">
+          <label class="mini">candidates <input type="number" id="candidates" value="5" min="1" max="12"></label>
+          <label class="mini">iters <input type="number" id="iters" value="12" min="1" max="50"></label>
+          <label class="mini">seed <input type="number" id="seed" value="1" min="0"></label>
+        </div>
+        <div class="row" style="margin-top:12px">
+          <button id="solve" class="primary">Solve</button>
+          <button id="edit" disabled>Back to editing</button>
+          <button id="gif" disabled>Download GIF</button>
+        </div>
+        <div id="status" style="margin-top:8px"></div>
+      </div>
+
+      <div class="panel">
+        <h2>Result</h2>
+        <div class="metrics" id="metrics"><span class="hint">no plan yet</span></div>
+      </div>
+    </aside>
+  </main>
+
+<script>
+"use strict";
+
+const PALETTE = ["#4e79a7","#f28e2b","#59a14f","#e15759","#b07aa1","#76b7b2","#edc948",
+  "#ff9da7","#9c755f","#bab0ac","#86bcb6","#d37295","#8cd17d","#b6992d","#499894","#fabfd2"];
+const color = i => PALETTE[i % PALETTE.length];
+
+const S = {
+  w: 0, h: 0, blocked: [],
+  agents: [],          // {sx,sy,gx,gy}
+  pending: null,       // {x,y} start awaiting a goal
+  tool: "agent",
+  paths: null,         // solved plan: array of array of [x,y]
+  makespan: 0,
+  t: 0, playing: false, lastFrame: 0,
+  cell: 32,
+};
+
+const canvas = document.getElementById("canvas");
+const ctx = canvas.getContext("2d");
+const $ = id => document.getElementById(id);
+
+// ---- grid setup ----------------------------------------------------------
+
+function setGrid(w, h, blocked) {
+  S.w = w; S.h = h;
+  S.blocked = blocked || Array.from({length: h}, () => Array(w).fill(false));
+  S.paths = null; S.pending = null; S.t = 0;
+  fit(); exitPlayMode(); draw();
+}
+function blankGrid(w, h) { setGrid(w, h, null); S.agents = []; renderAgents(); }
+
+function fit() {
+  const maxPx = 560;
+  S.cell = Math.max(8, Math.floor(maxPx / Math.max(S.w, S.h)));
+  canvas.width = S.w * S.cell;
+  canvas.height = S.h * S.cell;
+}
+
+// ---- drawing -------------------------------------------------------------
+
+function pos(a, ti) { const p = S.paths[a]; return ti < p.length ? p[ti] : p[p.length - 1]; }
+function lerp(a, tf) {
+  const t0 = Math.floor(tf), f = tf - t0;
+  const p0 = pos(a, t0), p1 = pos(a, t0 + 1);
+  return [p0[0] + (p1[0]-p0[0])*f, p0[1] + (p1[1]-p0[1])*f];
+}
+
+function draw() {
+  const c = S.cell;
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  for (let y = 0; y < S.h; y++) for (let x = 0; x < S.w; x++) {
+    ctx.fillStyle = S.blocked[y][x] ? "#05070a" : "#232732";
+    ctx.fillRect(x*c, y*c, c-1, c-1);
+  }
+  // agent markers: starts (ring) + goals (X), always shown
+  S.agents.forEach((a, i) => {
+    const col = color(i);
+    ctx.strokeStyle = col; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc((a.sx+0.5)*c, (a.sy+0.5)*c, c*0.28, 0, 7); ctx.stroke();
+    const gx=(a.gx+0.5)*c, gy=(a.gy+0.5)*c, r=c*0.22;
+    ctx.beginPath();
+    ctx.moveTo(gx-r,gy-r); ctx.lineTo(gx+r,gy+r);
+    ctx.moveTo(gx+r,gy-r); ctx.lineTo(gx-r,gy+r); ctx.stroke();
+  });
+  // pending start highlight
+  if (S.pending) {
+    ctx.strokeStyle = "#ffd43b"; ctx.lineWidth = 2;
+    ctx.strokeRect(S.pending.x*c+1, S.pending.y*c+1, c-3, c-3);
+  }
+  // moving dots (only in play mode)
+  if (S.paths) {
+    S.agents.forEach((a, i) => {
+      const [px, py] = lerp(i, S.t);
+      ctx.fillStyle = color(i); ctx.strokeStyle = "#05070a"; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc((px+0.5)*c, (py+0.5)*c, c*0.34, 0, 7); ctx.fill(); ctx.stroke();
+    });
+    $("tlabel").textContent = `${S.t.toFixed(2)} / ${S.makespan}`;
+    $("scrub").value = S.t;
+  }
+}
+
+// ---- editing -------------------------------------------------------------
+
+function cellAt(ev) {
+  const r = canvas.getBoundingClientRect();
+  return { x: Math.floor((ev.clientX - r.left) / S.cell),
+           y: Math.floor((ev.clientY - r.top) / S.cell) };
+}
+canvas.addEventListener("click", ev => {
+  if (S.paths) return;               // no editing while a plan is loaded
+  const {x, y} = cellAt(ev);
+  if (x < 0 || y < 0 || x >= S.w || y >= S.h) return;
+
+  if (S.tool === "obstacle") {
+    if (S.agents.some(a => (a.sx===x&&a.sy===y)||(a.gx===x&&a.gy===y))) return;
+    S.blocked[y][x] = !S.blocked[y][x];
+  } else if (S.tool === "erase") {
+    S.agents = S.agents.filter(a => !((a.sx===x&&a.sy===y)||(a.gx===x&&a.gy===y)));
+    renderAgents();
+  } else { // agent
+    if (S.blocked[y][x]) return;
+    if (!S.pending) S.pending = {x, y};
+    else {
+      if (x === S.pending.x && y === S.pending.y) { S.pending = null; }
+      else { S.agents.push({sx:S.pending.x, sy:S.pending.y, gx:x, gy:y}); S.pending = null; renderAgents(); }
+    }
+  }
+  draw();
+});
+
+function renderAgents() {
+  $("agentCount").textContent = S.agents.length;
+  const list = $("agentList");
+  list.innerHTML = "";
+  S.agents.forEach((a, i) => {
+    const div = document.createElement("div");
+    div.className = "agent";
+    div.innerHTML = `<span class="swatch" style="background:${color(i)}"></span>` +
+      `<span>(${a.sx},${a.sy}) &rarr; (${a.gx},${a.gy})</span>`;
+    const b = document.createElement("button");
+    b.textContent = "remove";
+    b.onclick = () => { S.agents.splice(i,1); renderAgents(); draw(); };
+    div.appendChild(b);
+    list.appendChild(div);
+  });
+}
+
+// ---- playback ------------------------------------------------------------
+
+function enterPlayMode() {
+  ["toStart","stepBack","play","stepFwd","toEnd","scrub"].forEach(id => $(id).disabled = false);
+  $("edit").disabled = false; $("gif").disabled = false;
+  $("scrub").max = S.makespan;
+}
+function exitPlayMode() {
+  setPlaying(false);
+  ["toStart","stepBack","play","stepFwd","toEnd","scrub"].forEach(id => $(id).disabled = true);
+  $("edit").disabled = true; $("gif").disabled = true;
+  $("tlabel").textContent = "-";
+}
+function setPlaying(v) { S.playing = v; $("play").innerHTML = v ? "&#9208;" : "&#9654;"; }
+
+function frame(now) {
+  if (S.playing && S.paths) {
+    const dt = (now - S.lastFrame) / 1000;
+    S.t += dt * 3;
+    if (S.t >= S.makespan) {
+      if ($("loop").checked) S.t = 0; else { S.t = S.makespan; setPlaying(false); }
+    }
+    draw();
+  }
+  S.lastFrame = now;
+  requestAnimationFrame(frame);
+}
+
+$("play").onclick = () => { if (S.paths) setPlaying(!S.playing); };
+$("toStart").onclick = () => { setPlaying(false); S.t = 0; draw(); };
+$("toEnd").onclick = () => { setPlaying(false); S.t = S.makespan; draw(); };
+$("stepFwd").onclick = () => { setPlaying(false); S.t = Math.min(S.makespan, Math.floor(S.t)+1); draw(); };
+$("stepBack").onclick = () => { setPlaying(false); S.t = Math.max(0, Math.ceil(S.t)-1); draw(); };
+$("scrub").oninput = e => { setPlaying(false); S.t = parseFloat(e.target.value); draw(); };
+
+// ---- tools + scenario loading -------------------------------------------
+
+document.querySelectorAll(".tool").forEach(btn => {
+  btn.onclick = () => {
+    document.querySelectorAll(".tool").forEach(b => b.classList.remove("active"));
+    btn.classList.add("active");
+    S.tool = btn.dataset.tool;
+    S.pending = null;
+    const hints = {
+      agent: "Click a cell for the start, then another for the goal.",
+      obstacle: "Click cells to toggle walls.",
+      erase: "Click an agent's start or goal to remove it.",
+    };
+    $("toolHint").textContent = hints[S.tool];
+    draw();
+  };
+});
+
+async function loadExample(name) {
+  const r = await fetch(`/api/example?name=${name}`);
+  const d = await r.json();
+  if (d.error) { setStatus(d.error, true); return; }
+  S.agents = d.agents;
+  setGrid(d.grid.w, d.grid.h, d.grid.blocked);
+  renderAgents();
+  setStatus(`loaded ${name}: ${d.agents.length} agents`);
+}
+document.querySelectorAll("[data-example]").forEach(b =>
+  b.onclick = () => loadExample(b.dataset.example));
+
+$("blank").onclick = () => {
+  const w = Math.max(2, Math.min(60, +$("newW").value));
+  const h = Math.max(2, Math.min(60, +$("newH").value));
+  blankGrid(w, h); setStatus(`blank ${w}x${h} grid`);
+};
+$("clearAgents").onclick = () => { S.agents = []; S.pending = null; renderAgents(); draw(); };
+$("loadMap").onclick = async () => {
+  const path = $("mapSelect").value;
+  if (!path) return;
+  const r = await fetch(`/api/map?path=${encodeURIComponent(path)}`);
+  const d = await r.json();
+  if (d.error) { setStatus(d.error, true); return; }
+  S.agents = [];
+  setGrid(d.grid.w, d.grid.h, d.grid.blocked);
+  renderAgents();
+  setStatus(`loaded ${path}`);
+};
+
+async function loadMapList() {
+  try {
+    const d = await (await fetch("/api/maps")).json();
+    const sel = $("mapSelect");
+    d.maps.forEach(m => {
+      const o = document.createElement("option"); o.value = m; o.textContent = m; sel.appendChild(o);
+    });
+  } catch (e) { /* server may be down; ignore */ }
+}
+
+// ---- solve + gif ---------------------------------------------------------
+
+function setStatus(msg, bad) { const s = $("status"); s.textContent = msg; s.className = bad ? "bad" : ""; }
+
+$("solve").onclick = async () => {
+  if (!S.agents.length) { setStatus("place at least one agent first", true); return; }
+  $("solve").disabled = true; setStatus("solving...");
+  const budget = {
+    sweeps:+$("sweeps").value, replicas:+$("replicas").value,
+    candidates:+$("candidates").value, iters:+$("iters").value, seed:+$("seed").value,
+  };
+  try {
+    const r = await fetch("/api/solve", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({grid: {w:S.w, h:S.h, blocked:S.blocked}, agents:S.agents, budget}),
+    });
+    const d = await r.json();
+    if (d.error) { setStatus(d.error, true); $("solve").disabled = false; return; }
+    S.paths = d.paths;
+    S.makespan = Math.max(...S.paths.map(p => p.length - 1));
+    S.t = 0;
+    showMetrics(d);
+    enterPlayMode(); setPlaying(true);
+    setStatus(d.success ? "solved" : "no conflict-free plan found (showing best attempt)", !d.success);
+  } catch (e) {
+    setStatus("request failed: " + e, true);
+  } finally {
+    $("solve").disabled = false;
+  }
+};
+
+function showMetrics(d) {
+  const m = d.metrics || {};
+  const ok = d.success;
+  $("metrics").innerHTML =
+    `<div>status: <b class="${ok?'ok':'bad'}">${ok?'success':'failed'}</b></div>` +
+    `<div>sum-of-costs: <b>${m['sum-of-costs']??'?'}</b> ` +
+    `(optimal ${m['sum-of-optimal']??'?'})</div>` +
+    `<div>overhead: <b>${m['overhead']??'?'}</b></div>` +
+    `<div>conflicts: <b>${m['conflicts']??'?'}</b></div>` +
+    `<div>iterations: <b>${m['iterations']??'?'}</b></div>` +
+    `<div>wall: <b>${m['wall_ms']??'?'} ms</b></div>`;
+}
+
+$("edit").onclick = () => { S.paths = null; exitPlayMode(); draw(); setStatus("editing"); };
+
+$("gif").onclick = async () => {
+  if (!S.paths) return;
+  setStatus("rendering GIF...");
+  try {
+    const r = await fetch("/api/gif", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({grid: {w:S.w, h:S.h, blocked:S.blocked}, paths: S.paths}),
+    });
+    if (!r.ok) { const d = await r.json(); setStatus(d.error || "gif failed", true); return; }
+    const blob = await r.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = "plan.gif"; a.click();
+    URL.revokeObjectURL(url);
+    setStatus("GIF downloaded");
+  } catch (e) { setStatus("gif request failed: " + e, true); }
+};
+
+// ---- boot ----------------------------------------------------------------
+
+loadMapList();
+blankGrid(12, 12);
+setStatus("ready -- load a demo or place agents, then Solve");
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
