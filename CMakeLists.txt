@@ -57,6 +57,10 @@ add_executable(test_verifier tests/test_verifier.cpp)
 target_link_libraries(test_verifier PRIVATE mapf)
 add_test(NAME verifier COMMAND test_verifier)
 
+add_executable(test_path_gen tests/test_path_gen.cpp)
+target_link_libraries(test_path_gen PRIVATE mapf)
+add_test(NAME path_gen COMMAND test_path_gen)
+
 add_executable(demo_partition src/demo_partition.cpp)
 target_link_libraries(demo_partition PRIVATE anneal)
 
