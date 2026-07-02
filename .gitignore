@@ -1,0 +1,5 @@
+build/
+*.o
+test_bqm
+test_annealer
+demo_partition
