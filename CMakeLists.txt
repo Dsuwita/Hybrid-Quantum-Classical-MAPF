@@ -61,6 +61,15 @@ add_executable(test_path_gen tests/test_path_gen.cpp)
 target_link_libraries(test_path_gen PRIVATE mapf)
 add_test(NAME path_gen COMMAND test_path_gen)
 
+# conflict_qubo consumes the anneal library (brute force + annealer), so
+# this test links both.
+add_executable(test_conflict_qubo tests/test_conflict_qubo.cpp)
+target_link_libraries(test_conflict_qubo PRIVATE mapf anneal)
+add_test(NAME conflict_qubo COMMAND test_conflict_qubo)
+
+add_executable(mapf_penalty_experiment src/mapf_penalty_experiment.cpp)
+target_link_libraries(mapf_penalty_experiment PRIVATE mapf anneal)
+
 add_executable(demo_partition src/demo_partition.cpp)
 target_link_libraries(demo_partition PRIVATE anneal)
 
