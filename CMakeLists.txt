@@ -21,6 +21,11 @@ add_compile_options(-Wall -Wextra)
 add_library(anneal INTERFACE)
 target_include_directories(anneal INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
+# std::thread needs the platform thread library on older glibc/other libcs
+# (glibc >= 2.34 folds pthreads into libc, but don't rely on that).
+find_package(Threads REQUIRED)
+target_link_libraries(anneal INTERFACE Threads::Threads)
+
 enable_testing()
 
 add_executable(test_bqm tests/test_bqm.cpp)
@@ -35,8 +40,15 @@ add_executable(test_fast_annealer tests/test_fast_annealer.cpp)
 target_link_libraries(test_fast_annealer PRIVATE anneal)
 add_test(NAME fast_annealer COMMAND test_fast_annealer)
 
+add_executable(test_parallel tests/test_parallel.cpp)
+target_link_libraries(test_parallel PRIVATE anneal)
+add_test(NAME parallel COMMAND test_parallel)
+
 add_executable(demo_partition src/demo_partition.cpp)
 target_link_libraries(demo_partition PRIVATE anneal)
 
 add_executable(bench_throughput src/bench_throughput.cpp)
 target_link_libraries(bench_throughput PRIVATE anneal)
+
+add_executable(bench_scaling src/bench_scaling.cpp)
+target_link_libraries(bench_scaling PRIVATE anneal)

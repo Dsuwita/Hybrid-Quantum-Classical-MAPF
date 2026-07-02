@@ -11,19 +11,19 @@
 // bench/opt_log.md). Levels are cumulative:
 //
 //   Level 1 — flat storage. The BQM's std::map adjacency lists are copied
-//     once at construction into contiguous CSR-style arrays (a neighbor
-//     index array + a parallel coupling array + per-variable offsets into
-//     both). Walking a variable's neighbors becomes a linear scan of a
-//     few consecutive doubles instead of chasing red-black tree nodes
-//     scattered across the heap; the CPU prefetcher loves this.
+//     once into contiguous CSR-style arrays (a neighbor index array + a
+//     parallel coupling array + per-variable offsets into both). Walking
+//     a variable's neighbors becomes a linear scan of a few consecutive
+//     doubles instead of chasing red-black tree nodes scattered across
+//     the heap; the CPU prefetcher loves this.
 //
 //   Level 2 — local field cache. Instead of recomputing the local field
 //     f_i = h_i + sum_j J_ij s_j from scratch for every proposal, keep
-//     all n fields in an array. A proposal is then one multiply
+//     all n fields cached. A proposal is then one multiply
 //     (dE = -2 s_i f_i). The price: when a flip IS accepted, walk i's
-//     neighbors once and adjust their cached fields (s_i changed sign, so
-//     f_j changes by 2 J_ij s_i_new). Proposals vastly outnumber accepts
-//     at low temperature, so this trades cheap-accept for cheap-propose.
+//     neighbors once and adjust their cached fields. Proposals vastly
+//     outnumber accepts at low temperature, so this trades cheap-accept
+//     for cheap-propose.
 //
 //   Level 3 — downhill early-exit. dE <= 0 is always accepted, so skip
 //     both the exp() call and the RNG draw for downhill proposals.
@@ -31,12 +31,12 @@
 //     uniform draw from [0,1) is always below it.)
 //
 //   Level 4 — acceptance lookup table. If every bias and coupling is an
-//     integer (detected once at construction), every possible dE is an
-//     even integer with |dE| <= 2 * max_i (|h_i| + sum_j |J_ij|). So each
-//     time the temperature changes (once per sweep), precompute
-//     exp(-dE/T) for every positive integer dE up to that bound; the hot
-//     loop replaces exp() with an array lookup. Non-integer problems fall
-//     back to calling exp() (level 3 behavior).
+//     integer (detected once when the compact view is built), every
+//     possible dE is an even integer with |dE| <= 2 * max_i (|h_i| +
+//     sum_j |J_ij|). So each time the temperature changes (once per
+//     sweep), precompute the acceptance threshold for every positive
+//     integer dE up to that bound; the hot loop replaces exp() with an
+//     array lookup. Non-integer problems fall back to calling exp().
 //
 // The RNG is a template parameter (std::mt19937_64 by default, Xoshiro256pp
 // from rng.hpp as the fast alternative — that swap is optimization 5).
@@ -58,24 +58,132 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <random>
 #include <vector>
 
 namespace anneal {
+
+// Read-only CSR-style snapshot of a (spin-vartype) BQM, built once from
+// the std::map-based BQM and then never modified. Separated from the
+// annealer itself so that parallel restarts (parallel.hpp) can build the
+// view a single time and share it across worker threads: sharing is safe
+// precisely because nothing in a solve ever writes to it.
+struct CompactBQM {
+    std::size_t num_variables = 0;
+    double offset = 0.0;
+    std::vector<double> linear;
+    // Variable i's neighbors live at [row_start[i], row_start[i+1]) of
+    // nbr_index / nbr_coupling.
+    std::vector<std::size_t> row_start;
+    std::vector<std::size_t> nbr_index;
+    std::vector<double> nbr_coupling;
+    // Level 4 metadata: whether every bias/coupling is an integer, and
+    // if so how large the per-temperature acceptance table must be
+    // (max possible dE + 1). The table itself lives in the annealer
+    // (it changes with temperature); only its size is decided here.
+    bool integer_mode = false;
+    std::size_t accept_table_size = 0;
+
+    explicit CompactBQM(const BQM& input) {
+        // Work in spin space, like the naive annealer.
+        const BQM* source = &input;
+        BQM converted(0, Vartype::Spin);
+        if (input.vartype() != Vartype::Spin) {
+            converted = input;
+            converted.change_vartype(Vartype::Spin);
+            source = &converted;
+        }
+        const BQM& bqm = *source;
+
+        num_variables = bqm.num_variables();
+        offset = bqm.offset();
+        linear.resize(num_variables);
+        row_start.resize(num_variables + 1, 0);
+        for (std::size_t i = 0; i < num_variables; ++i) {
+            linear[i] = bqm.linear(i);
+            row_start[i + 1] = row_start[i] + bqm.neighbors(i).size();
+        }
+        nbr_index.resize(row_start.back());
+        nbr_coupling.resize(row_start.back());
+        for (std::size_t i = 0; i < num_variables; ++i) {
+            std::size_t e = row_start[i];
+            for (const auto& [j, coupling] : bqm.neighbors(i)) {
+                nbr_index[e] = j;
+                nbr_coupling[e] = coupling;
+                ++e;
+            }
+        }
+        detect_integer_mode();
+    }
+
+    double compute_field(std::size_t i, const std::vector<double>& spin) const {
+        double field = linear[i];
+        for (std::size_t e = row_start[i]; e < row_start[i + 1]; ++e) {
+            field += nbr_coupling[e] * spin[nbr_index[e]];
+        }
+        return field;
+    }
+
+    double energy(const std::vector<double>& spin) const {
+        double e = offset;
+        for (std::size_t i = 0; i < num_variables; ++i) {
+            e += linear[i] * spin[i];
+            double local = 0.0;
+            for (std::size_t k = row_start[i]; k < row_start[i + 1]; ++k) {
+                local += nbr_coupling[k] * spin[nbr_index[k]];
+            }
+            e += 0.5 * spin[i] * local;  // each edge visited from both endpoints
+        }
+        return e;
+    }
+
+private:
+    // Check whether every bias/coupling is an integer. If so, the largest
+    // possible uphill dE is 2 * max_i (|h_i| + sum |J_ij|), which bounds
+    // the acceptance table. Bail out to the exp() fallback if the table
+    // would be unreasonably large (huge integer couplings give no benefit
+    // over exp).
+    void detect_integer_mode() {
+        double max_field_magnitude = 0.0;
+        for (std::size_t i = 0; i < num_variables; ++i) {
+            if (std::floor(linear[i]) != linear[i]) return;
+            double mag = std::fabs(linear[i]);
+            for (std::size_t e = row_start[i]; e < row_start[i + 1]; ++e) {
+                if (std::floor(nbr_coupling[e]) != nbr_coupling[e]) return;
+                mag += std::fabs(nbr_coupling[e]);
+            }
+            max_field_magnitude = std::max(max_field_magnitude, mag);
+        }
+        const double max_de = 2.0 * max_field_magnitude;
+        if (max_de > 65536.0) return;  // table too big to be worth it
+        integer_mode = true;
+        accept_table_size = static_cast<std::size_t>(max_de) + 1;
+    }
+};
 
 template <typename Schedule, typename Rng = std::mt19937_64, int OptLevel = 4>
 class FastAnnealer {
     static_assert(OptLevel >= 1 && OptLevel <= 4, "OptLevel must be 1..4");
 
 public:
+    // Standalone use: build (and own) the compact view from a BQM.
     FastAnnealer(const BQM& bqm, Schedule schedule, std::size_t num_sweeps, std::uint64_t seed)
-        : schedule_(schedule), num_sweeps_(num_sweeps), rng_(seed) {
-        // Work in spin space, like the naive annealer.
-        BQM spin_bqm = bqm;
-        if (spin_bqm.vartype() != Vartype::Spin) {
-            spin_bqm.change_vartype(Vartype::Spin);
-        }
-        build_compact_view(spin_bqm);
+        : owned_view_(std::make_shared<const CompactBQM>(bqm)),
+          view_(owned_view_.get()),
+          schedule_(schedule),
+          num_sweeps_(num_sweeps),
+          rng_(seed) {
+        allocate_accept_table();
+    }
+
+    // Shared-view use (parallel restarts): the caller guarantees the view
+    // outlives this annealer. The view is strictly read-only here, so any
+    // number of annealers on any threads may share one.
+    FastAnnealer(const CompactBQM& view, Schedule schedule, std::size_t num_sweeps,
+                 std::uint64_t seed)
+        : view_(&view), schedule_(schedule), num_sweeps_(num_sweeps), rng_(seed) {
+        allocate_accept_table();
     }
 
     // decision_log: same contract as Annealer::solve, for differential
@@ -93,9 +201,17 @@ private:
         double field;           // f_i = h_i + sum_j J_ij s_j
     };
 
+    void allocate_accept_table() {
+        if constexpr (OptLevel >= 4) {
+            accept_table_.assign(view_->accept_table_size, 0.0);
+        }
+    }
+
     template <bool kRecordDecisions>
     SolveResult solve_impl(std::vector<std::uint8_t>* decision_log) {
-        const std::size_t n = num_variables_;
+        const CompactBQM& view = *view_;
+        const std::size_t n = view.num_variables;
+        const bool integer_mode = view.integer_mode;
 
         // Spins are stored as doubles (+1.0 / -1.0) in the hot loop: dE
         // and the field updates are double arithmetic, and keeping the
@@ -135,11 +251,11 @@ private:
         if constexpr (OptLevel >= 2) {
             pairs.resize(n);
             for (std::size_t i = 0; i < n; ++i) {
-                pairs[i] = SpinField{-2.0 * spin[i], compute_field(i, spin)};
+                pairs[i] = SpinField{-2.0 * spin[i], view.compute_field(i, spin)};
             }
         }
 
-        double current_energy = initial_energy(spin);
+        double current_energy = view.energy(spin);
         // Best-so-far is kept as a preallocated double buffer: assigning
         // `best_spin = spin` on an improvement is a straight memcpy with
         // no allocation (capacity is already there), where converting to
@@ -149,16 +265,16 @@ private:
 
         // Hoist everything the hot loop touches into locals. The RNG and
         // the arrays are class members; accessed through `this`, the
-        // compiler must assume any store into spin/fields could alias
+        // compiler must assume any store into spin/pairs could alias
         // them, forcing it to spill and reload the RNG state around every
         // draw (8 extra memory ops per proposal). A local RNG copy whose
         // address is never taken, plus raw local pointers, let it keep
         // the RNG state and pointers in registers across the whole loop.
         double* const spin_ptr = spin.data();
         [[maybe_unused]] SpinField* const pairs_ptr = pairs.data();
-        [[maybe_unused]] const std::size_t* const row_start = row_start_.data();
-        [[maybe_unused]] const std::size_t* const nbr_index = nbr_index_.data();
-        [[maybe_unused]] const double* const nbr_coupling = nbr_coupling_.data();
+        [[maybe_unused]] const std::size_t* const row_start = view.row_start.data();
+        [[maybe_unused]] const std::size_t* const nbr_index = view.nbr_index.data();
+        [[maybe_unused]] const double* const nbr_coupling = view.nbr_coupling.data();
         [[maybe_unused]] double* const table = accept_table_.data();
         [[maybe_unused]] const std::size_t table_size = accept_table_.size();
 
@@ -175,7 +291,7 @@ private:
             // into the table removes a multiply from every uphill draw
             // while preserving bit-identical decisions vs the naive path.
             if constexpr (OptLevel >= 4) {
-                if (integer_mode_) {
+                if (integer_mode) {
                     constexpr double kTwoPow53 = 9007199254740992.0;
                     for (std::size_t k = 1; k < table_size; ++k) {
                         table[k] = std::exp(-static_cast<double>(k) / t) * kTwoPow53;
@@ -188,7 +304,7 @@ private:
                 if constexpr (OptLevel >= 2) {
                     d_energy = pairs_ptr[i].minus_two_spin * pairs_ptr[i].field;
                 } else {
-                    d_energy = -2.0 * spin_ptr[i] * compute_field(i, spin);
+                    d_energy = -2.0 * spin_ptr[i] * view.compute_field(i, spin);
                 }
 
                 bool accept;
@@ -196,7 +312,7 @@ private:
                     if (d_energy <= 0.0) {
                         accept = true;
                     } else if constexpr (OptLevel >= 4) {
-                        accept = integer_mode_
+                        accept = integer_mode
                                      ? static_cast<double>(rng() >> 11) <
                                            table[static_cast<std::size_t>(d_energy)]
                                      : uniform01(rng) < std::exp(-d_energy / t);
@@ -245,89 +361,12 @@ private:
         return out;
     }
 
-private:
-    // Copy the BQM's adjacency lists into CSR form: variable i's neighbors
-    // live at indices [row_start_[i], row_start_[i+1]) of nbr_index_ /
-    // nbr_coupling_. Built once; the solve loop never touches the BQM.
-    void build_compact_view(const BQM& bqm) {
-        num_variables_ = bqm.num_variables();
-        offset_ = bqm.offset();
+    // Present only when this annealer built its own view; empty when a
+    // caller-owned shared view is used.
+    std::shared_ptr<const CompactBQM> owned_view_;
+    const CompactBQM* view_;
 
-        linear_.resize(num_variables_);
-        row_start_.resize(num_variables_ + 1, 0);
-        for (std::size_t i = 0; i < num_variables_; ++i) {
-            linear_[i] = bqm.linear(i);
-            row_start_[i + 1] = row_start_[i] + bqm.neighbors(i).size();
-        }
-        nbr_index_.resize(row_start_.back());
-        nbr_coupling_.resize(row_start_.back());
-        for (std::size_t i = 0; i < num_variables_; ++i) {
-            std::size_t e = row_start_[i];
-            for (const auto& [j, coupling] : bqm.neighbors(i)) {
-                nbr_index_[e] = j;
-                nbr_coupling_[e] = coupling;
-                ++e;
-            }
-        }
-
-        if constexpr (OptLevel >= 4) {
-            detect_integer_mode();
-        }
-    }
-
-    // Level 4 setup: check whether every bias/coupling is an integer. If
-    // so, the largest possible uphill dE is 2 * max_i (|h_i| + sum |J_ij|),
-    // and we can size the acceptance table accordingly. Bail out to the
-    // exp() fallback if the table would be unreasonably large (huge
-    // integer couplings give no benefit over exp).
-    void detect_integer_mode() {
-        double max_field_magnitude = 0.0;
-        for (std::size_t i = 0; i < num_variables_; ++i) {
-            if (std::floor(linear_[i]) != linear_[i]) return;
-            double mag = std::fabs(linear_[i]);
-            for (std::size_t e = row_start_[i]; e < row_start_[i + 1]; ++e) {
-                if (std::floor(nbr_coupling_[e]) != nbr_coupling_[e]) return;
-                mag += std::fabs(nbr_coupling_[e]);
-            }
-            max_field_magnitude = std::max(max_field_magnitude, mag);
-        }
-        const double max_de = 2.0 * max_field_magnitude;
-        if (max_de > 65536.0) return;  // table too big to be worth it
-        integer_mode_ = true;
-        accept_table_.assign(static_cast<std::size_t>(max_de) + 1, 0.0);
-    }
-
-    double compute_field(std::size_t i, const std::vector<double>& spin) const {
-        double field = linear_[i];
-        for (std::size_t e = row_start_[i]; e < row_start_[i + 1]; ++e) {
-            field += nbr_coupling_[e] * spin[nbr_index_[e]];
-        }
-        return field;
-    }
-
-    double initial_energy(const std::vector<double>& spin) const {
-        double e = offset_;
-        for (std::size_t i = 0; i < num_variables_; ++i) {
-            e += linear_[i] * spin[i];
-            double local = 0.0;
-            for (std::size_t k = row_start_[i]; k < row_start_[i + 1]; ++k) {
-                local += nbr_coupling_[k] * spin[nbr_index_[k]];
-            }
-            e += 0.5 * spin[i] * local;  // each edge visited from both endpoints
-        }
-        return e;
-    }
-
-    // CSR compact view of the (spin-vartype) BQM.
-    std::size_t num_variables_ = 0;
-    double offset_ = 0.0;
-    std::vector<double> linear_;
-    std::vector<std::size_t> row_start_;
-    std::vector<std::size_t> nbr_index_;
-    std::vector<double> nbr_coupling_;
-
-    // Level 4 acceptance table state.
-    bool integer_mode_ = false;
+    // Level 4 acceptance table, rebuilt at each temperature change.
     std::vector<double> accept_table_;
 
     Schedule schedule_;
