@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<!--
+  Max-Cut solver comparison (front end for serve.py). Pick a Gset instance
+  and a budget, press Run, and the server solves it two ways -- the
+  simulated annealer and a classical multi-start local search -- and
+  reports each solver's cut as a percent of the best-known value, side by
+  side. Plain HTML + fetch; served at /maxcut.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Max-Cut: annealer vs classical</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: system-ui, sans-serif; background: #14161a; color: #e6e8eb; }
+  header { padding: 14px 22px; border-bottom: 1px solid #2b303b;
+           display: flex; justify-content: space-between; align-items: baseline; }
+  header h1 { margin: 0; font-size: 17px; }
+  header a { color: #8b93a0; font-size: 13px; }
+  main { max-width: 820px; margin: 0 auto; padding: 22px; }
+  .panel { background: #1c1f26; border: 1px solid #2b303b; border-radius: 10px;
+           padding: 16px 18px; margin-bottom: 18px; }
+  .row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+  label.mini { font-size: 12px; color: #aab2bd; display: flex; flex-direction: column; gap: 3px; }
+  select, input[type=number], button {
+    background: #2b303b; color: #e6e8eb; border: 1px solid #3a4150; border-radius: 6px;
+    padding: 7px 11px; font-size: 14px;
+  }
+  input[type=number] { width: 90px; }
+  button.primary { background: #2f9e44; border-color: #2f9e44; font-weight: 600; cursor: pointer; }
+  button.primary:disabled { opacity: .5; }
+  .cards { display: flex; gap: 16px; flex-wrap: wrap; }
+  .card { flex: 1 1 320px; background: #1c1f26; border: 1px solid #2b303b; border-radius: 10px;
+          padding: 16px 18px; }
+  .card h2 { margin: 0 0 4px; font-size: 15px; }
+  .card .sub { color: #7f8794; font-size: 12px; margin-bottom: 12px; }
+  .pct { font-size: 34px; font-weight: 700; }
+  .bar { height: 12px; background: #0f1115; border-radius: 6px; overflow: hidden; margin: 10px 0; }
+  .bar > div { height: 100%; }
+  .detail { font-size: 13px; color: #aab2bd; line-height: 1.7; }
+  .anneal .pct, .anneal .bar > div { color: #4dabf7; background: #4dabf7; }
+  .anneal .pct { background: none; }
+  .classic .pct, .classic .bar > div { color: #ffa94d; background: #ffa94d; }
+  .classic .pct { background: none; }
+  #status { font-size: 13px; color: #aab2bd; min-height: 18px; margin-top: 6px; }
+  .verdict { font-size: 14px; margin-top: 10px; }
+  .hint { color: #7f8794; font-size: 12px; }
+</style>
+</head>
+<body>
+  <header>
+    <h1>Max-Cut: annealer vs classical</h1>
+    <a href="/">&larr; MAPF studio</a>
+  </header>
+
+  <main>
+    <div class="panel">
+      <div class="row">
+        <label class="mini">instance
+          <select id="instance"><option value="">-- loading --</option></select>
+        </label>
+        <label class="mini">sweeps (annealer) <input type="number" id="sweeps" value="20000" min="1" max="200000"></label>
+        <label class="mini">replicas <input type="number" id="replicas" value="16" min="1" max="64"></label>
+        <label class="mini">restarts (classical) <input type="number" id="restarts" value="200" min="1" max="5000"></label>
+        <label class="mini">seed <input type="number" id="seed" value="1" min="0"></label>
+        <button id="run" class="primary">Run both</button>
+      </div>
+      <div id="status"></div>
+      <div class="hint">
+        Instances come from <code>data/download_gset.sh</code>. Both solvers run on the same
+        graph; the percentage is of the published best-known cut.
+      </div>
+    </div>
+
+    <div class="cards">
+      <div class="card anneal">
+        <h2>Simulated annealer</h2>
+        <div class="sub">parallel restarts + Metropolis</div>
+        <div class="pct" id="a_pct">-</div>
+        <div class="bar"><div id="a_bar" style="width:0"></div></div>
+        <div class="detail" id="a_detail"></div>
+      </div>
+      <div class="card classic">
+        <h2>Classical local search</h2>
+        <div class="sub">multi-start 1-opt hill climbing</div>
+        <div class="pct" id="c_pct">-</div>
+        <div class="bar"><div id="c_bar" style="width:0"></div></div>
+        <div class="detail" id="c_detail"></div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="verdict" id="verdict"><span class="hint">Run to compare.</span></div>
+    </div>
+  </main>
+
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+
+async function loadInstances() {
+  try {
+    const d = await (await fetch("/api/gset")).json();
+    const sel = $("instance");
+    sel.innerHTML = "";
+    if (!d.instances.length) {
+      sel.innerHTML = '<option value="">(none -- run data/download_gset.sh)</option>';
+      return;
+    }
+    for (const it of d.instances) {
+      const o = document.createElement("option");
+      o.value = it.name;
+      o.textContent = it.best ? `${it.name} (best ${it.best})` : `${it.name} (best unknown)`;
+      sel.appendChild(o);
+    }
+  } catch (e) { $("status").textContent = "server unreachable"; }
+}
+
+function showSolver(prefix, r, best) {
+  const pctText = best ? r.percent.toFixed(2) + "%" : "n/a";
+  $(prefix + "_pct").textContent = pctText;
+  $(prefix + "_bar").style.width = best ? Math.min(100, r.percent) + "%" : "0";
+  $(prefix + "_detail").innerHTML =
+    `cut <b style="color:#e6e8eb">${r.cut}</b>` +
+    (best ? ` of ${best}` : "") +
+    `<br>wall ${r.wall_ms.toFixed(0)} ms`;
+}
+
+$("run").onclick = async () => {
+  const instance = $("instance").value;
+  if (!instance) { $("status").textContent = "pick an instance"; return; }
+  $("run").disabled = true;
+  $("status").textContent = "solving with both methods...";
+  const budget = {
+    sweeps: +$("sweeps").value, replicas: +$("replicas").value,
+    restarts: +$("restarts").value, seed: +$("seed").value,
+  };
+  try {
+    const r = await (await fetch("/api/maxcut", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({instance, budget}),
+    })).json();
+    if (r.error) { $("status").textContent = r.error; return; }
+
+    showSolver("a", r.annealer, r.best);
+    showSolver("c", r.classical, r.best);
+
+    const da = r.annealer.cut - r.classical.cut;
+    let verdict;
+    if (da > 0) {
+      verdict = `The annealer found a cut ${da} higher than classical local search ` +
+                `(${(r.annealer.cut/r.classical.cut*100 - 100).toFixed(2)}% more), ` +
+                `taking ${(r.annealer.wall_ms/r.classical.wall_ms).toFixed(1)}x the time.`;
+    } else if (da < 0) {
+      verdict = `Classical local search edged out the annealer by ${-da} on this run.`;
+    } else {
+      verdict = `Both solvers found the same cut (${r.annealer.cut}).`;
+    }
+    $("verdict").textContent = verdict;
+    $("status").textContent = `done: ${r.nodes} nodes, ${r.edges} edges`;
+  } catch (e) {
+    $("status").textContent = "request failed: " + e;
+  } finally {
+    $("run").disabled = false;
+  }
+};
+
+loadInstances();
+</script>
+</body>
+</html>

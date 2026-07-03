@@ -8,6 +8,7 @@
 
 #include "anneal/bruteforce.hpp"
 #include "anneal/parallel.hpp"
+#include "anneal/problems/classical_maxcut.hpp"
 #include "anneal/problems/maxcut.hpp"
 #include "anneal/problems/partition.hpp"
 #include "anneal/schedule.hpp"
@@ -143,11 +144,35 @@ void test_partition() {
     std::printf("test_partition passed (difference %.0f)\n", diff);
 }
 
+// The classical multi-start local search must never exceed the true
+// maximum cut, must report a cut that matches the independent recount of
+// its returned state, and should reach the optimum on small graphs.
+void test_classical_local_search() {
+    std::mt19937_64 rng(11);
+    int exact_hits = 0;
+    const int trials = 20;
+    for (int t = 0; t < trials; ++t) {
+        std::uniform_int_distribution<int> nd(8, 14);
+        std::size_t n = static_cast<std::size_t>(nd(rng));
+        Graph g = erdos_renyi(n, 0.5, rng(), 1.0);
+        double exact = brute_force_max_cut(g);
+
+        ClassicalResult r = multistart_local_search_maxcut(g, 40, 100 + t);
+        assert(r.cut <= exact + 1e-9);                       // never beats optimum
+        assert(close(r.cut, cut_value(g, r.state)));         // reported == recount
+        if (close(r.cut, exact)) ++exact_hits;
+    }
+    std::printf("test_classical_local_search: %d/%d exact\n", exact_hits, trials);
+    assert(exact_hits >= 18);
+    std::printf("test_classical_local_search passed\n");
+}
+
 }  // namespace
 
 int main() {
     test_mapping_matches_recount();
     test_annealer_finds_max_cut();
+    test_classical_local_search();
     test_d_regular_degrees();
     test_verifier_catches_corruption();
     test_gset_parser_roundtrip();

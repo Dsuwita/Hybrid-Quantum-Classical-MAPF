@@ -39,8 +39,15 @@ EXAMPLES = {
 
 # Clamp user-supplied budgets so a stray value cannot wedge the machine.
 LIMITS = {"sweeps": (1, 200000), "replicas": (1, 64), "candidates": (1, 12),
-          "iters": (1, 50)}
+          "iters": (1, 50), "restarts": (1, 5000)}
 MAX_AGENTS = 40
+
+# Max-Cut comparison: the compiled runner and the Gset instances, plus the
+# published best-known cut values for the instances the download script
+# fetches (Benlic & Hao, 2013).
+COMPARE_BIN = ROOT / "build" / "compare_maxcut"
+GSET_DIR = ROOT / "data" / "gset"
+BEST_KNOWN = {"G1": 11624, "G22": 13359, "G39": 2408, "G55": 10294}
 
 
 def clamp(name, value, fallback):
@@ -191,6 +198,42 @@ def run_solve(w, h, blocked, agents, budget):
     }
 
 
+def list_gset():
+    """Available Gset instances with their best-known cut (0 if unknown)."""
+    out = []
+    if GSET_DIR.is_dir():
+        for p in sorted(GSET_DIR.iterdir()):
+            if p.is_file():
+                out.append({"name": p.name, "best": BEST_KNOWN.get(p.name, 0)})
+    return out
+
+
+def run_compare(instance, budget):
+    """Run the annealer and the classical solver on a Gset instance and
+    return their cuts, percents, and wall times."""
+    if not COMPARE_BIN.exists():
+        return {"error": "build/compare_maxcut not found; build the project first"}
+    # Only allow a bare instance name that actually sits in the Gset dir.
+    name = pathlib.Path(instance).name
+    path = GSET_DIR / name
+    if not path.is_file():
+        return {"error": f"unknown instance {name!r}; run data/download_gset.sh"}
+
+    best = BEST_KNOWN.get(name, 0)
+    cmd = [str(COMPARE_BIN), str(path), "--best", str(best),
+           "--sweeps", str(clamp("sweeps", budget.get("sweeps"), 20000)),
+           "--replicas", str(clamp("replicas", budget.get("replicas"), 16)),
+           "--restarts", str(clamp("restarts", budget.get("restarts"), 200)),
+           "--seed", str(int(budget.get("seed", 1)))]
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    try:
+        result = json.loads(proc.stdout.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        return {"error": "compare_maxcut produced no result", "stderr": proc.stderr[-400:]}
+    result["instance"] = name
+    return result
+
+
 def render_gif(w, h, blocked, paths):
     try:
         import matplotlib  # noqa: F401
@@ -240,6 +283,11 @@ def make_handler():
             if path in ("/", "/index.html"):
                 self._send(200, "text/html; charset=utf-8",
                            (VIZ / "app.html").read_bytes())
+            elif path == "/maxcut":
+                self._send(200, "text/html; charset=utf-8",
+                           (VIZ / "maxcut.html").read_bytes())
+            elif path == "/api/gset":
+                self._json({"instances": list_gset()})
             elif path == "/api/maps":
                 maps = []
                 for d in MAP_DIRS:
@@ -282,6 +330,13 @@ def make_handler():
                     self._json({"error": "solver timed out"}, 504)
                 except Exception as e:  # keep the server alive on any failure
                     self._json({"error": f"solve failed: {e}"}, 500)
+            elif self.path == "/api/maxcut":
+                try:
+                    self._json(run_compare(body.get("instance", ""), body.get("budget", {})))
+                except subprocess.TimeoutExpired:
+                    self._json({"error": "solvers timed out"}, 504)
+                except Exception as e:
+                    self._json({"error": f"compare failed: {e}"}, 500)
             elif self.path == "/api/gif":
                 g = body.get("grid", {})
                 paths = body.get("paths", [])

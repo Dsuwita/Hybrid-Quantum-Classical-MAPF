@@ -112,3 +112,6 @@ target_link_libraries(bench_rolling PRIVATE mapf anneal)
 
 add_executable(solve_maxcut src/solve_maxcut.cpp)
 target_link_libraries(solve_maxcut PRIVATE anneal)
+
+add_executable(compare_maxcut src/compare_maxcut.cpp)
+target_link_libraries(compare_maxcut PRIVATE anneal)
