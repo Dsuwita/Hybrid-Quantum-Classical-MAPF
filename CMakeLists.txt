@@ -75,6 +75,11 @@ add_executable(test_rolling tests/test_rolling.cpp)
 target_link_libraries(test_rolling PRIVATE mapf anneal)
 add_test(NAME rolling COMMAND test_rolling)
 
+# CBS: the classical optimal solver, the studio's comparison target.
+add_executable(test_cbs tests/test_cbs.cpp)
+target_link_libraries(test_cbs PRIVATE mapf anneal)
+add_test(NAME cbs COMMAND test_cbs)
+
 add_executable(test_obstacles tests/test_obstacles.cpp)
 target_link_libraries(test_obstacles PRIVATE mapf anneal)
 add_test(NAME obstacles COMMAND test_obstacles)
@@ -84,6 +89,16 @@ target_link_libraries(mapf_penalty_experiment PRIVATE mapf anneal)
 
 add_executable(solve_mapf src/solve_mapf.cpp)
 target_link_libraries(solve_mapf PRIVATE mapf anneal)
+
+add_executable(solve_cbs src/solve_cbs.cpp)
+target_link_libraries(solve_cbs PRIVATE mapf anneal)
+
+# Streaming solvers for the studio's Server-Sent Events endpoints.
+add_executable(solve_stream src/solve_stream.cpp)
+target_link_libraries(solve_stream PRIVATE mapf anneal)
+
+add_executable(anneal_stream src/anneal_stream.cpp)
+target_link_libraries(anneal_stream PRIVATE anneal)
 
 add_executable(bench_mapf src/bench_mapf.cpp)
 target_link_libraries(bench_mapf PRIVATE mapf anneal)
@@ -98,6 +113,16 @@ add_executable(test_problems tests/test_problems.cpp)
 target_link_libraries(test_problems PRIVATE anneal)
 add_test(NAME problems COMMAND test_problems)
 
+# Milestone 7(a): parallel tempering.
+add_executable(test_tempering tests/test_tempering.cpp)
+target_link_libraries(test_tempering PRIVATE anneal)
+add_test(NAME tempering COMMAND test_tempering)
+
+# Milestone 7(b): multi-spin coding.
+add_executable(test_multispin tests/test_multispin.cpp)
+target_link_libraries(test_multispin PRIVATE anneal)
+add_test(NAME multispin COMMAND test_multispin)
+
 add_executable(demo_partition src/demo_partition.cpp)
 target_link_libraries(demo_partition PRIVATE anneal)
 
@@ -106,6 +131,15 @@ target_link_libraries(bench_throughput PRIVATE anneal)
 
 add_executable(bench_scaling src/bench_scaling.cpp)
 target_link_libraries(bench_scaling PRIVATE anneal)
+
+add_executable(bench_quality src/bench_quality.cpp)
+target_link_libraries(bench_quality PRIVATE anneal)
+
+add_executable(bench_tempering src/bench_tempering.cpp)
+target_link_libraries(bench_tempering PRIVATE anneal)
+
+add_executable(bench_multispin src/bench_multispin.cpp)
+target_link_libraries(bench_multispin PRIVATE anneal)
 
 add_executable(bench_rolling src/bench_rolling.cpp)
 target_link_libraries(bench_rolling PRIVATE mapf anneal)

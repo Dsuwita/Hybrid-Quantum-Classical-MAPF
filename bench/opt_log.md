@@ -99,3 +99,27 @@ Final config vs the verbatim Milestone 2 baseline on the same schedule:
 pinned runs.** The >= 10x criterion is met at the median but is within
 this machine's noise band; the per-step contributions above are stable
 across runs even when the absolute numbers shift.
+
+## Multi-spin coding (Milestone 7b)
+
+A separate optimization axis: instead of making one replica faster, run 64
+at once by packing one bit per replica into a uint64_t word per spin and
+updating all 64 with bitwise operations (Isakov et al. "an_ms" codes).
+Scoped to +/-1 couplings with zero field. On the n=2000 random 3-regular
++/-1 instance, best of 3 timed runs (`./build/bench_multispin`):
+
+| method | flips/ns | speedup |
+|---|---|---|
+| scalar FastAnnealer (L4) | 0.151 | 1.0x |
+| multi-spin (64 replicas/word) | 0.518 | 3.4x |
+
+So producing 64 replicas' worth of annealing is 3.4x faster than 64
+sequential scalar runs. It is well short of the 64x ceiling because the
+scalar path is already heavily optimized (lookup table + early exit) while
+each multi-spin update does bit-sliced integer arithmetic (the per-lane
+unsatisfied-edge count) and a B-bit per-lane acceptance compare. The gain
+grows on denser graphs, where the fixed per-site acceptance cost is
+amortized over more edges. Correctness is checked in tests/test_multispin.cpp:
+the bit-sliced per-lane flip arithmetic matches a scalar recomputation for
+all 64 lanes, and the solver reaches the exact brute-force ground state on
+small instances (energy audited).

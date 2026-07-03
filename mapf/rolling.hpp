@@ -97,6 +97,24 @@ struct ObstacleModel {
 // next goal. Leave empty for one-shot mode (agents stop once they arrive).
 using GoalProvider = std::function<Cell(std::size_t a, std::mt19937_64& rng)>;
 
+// Per-cycle progress, reported to a caller-supplied callback right after each
+// replan cycle commits its steps. This is what the studio's Server-Sent
+// Events endpoint forwards to the browser so the canvas animates the solve
+// live (agents move as each window is committed) instead of waiting for the
+// whole run to finish. `frames` are the cells committed THIS cycle, one entry
+// per committed timestep, each a per-agent position vector, so the frontend
+// can simply append them to what it is already drawing.
+struct RollingProgress {
+    std::size_t cycle = 0;          // replan cycle index (0-based)
+    std::size_t step = 0;           // global timestep after this cycle
+    double cycle_ms = 0.0;          // wall time spent in this cycle
+    std::size_t goals_reached = 0;  // cumulative goal arrivals so far
+    std::size_t active = 0;         // agents not yet on their goal
+    std::vector<std::vector<Cell>> frames;   // committed frames this cycle
+    std::vector<Cell> obstacles;    // obstacle cells at the latest timestep
+};
+using ProgressCallback = std::function<void(const RollingProgress&)>;
+
 namespace detail {
 
 inline Cell path_at(const std::vector<Cell>& p, std::size_t t) {
@@ -157,7 +175,8 @@ inline RollingResult simulate_rolling(const Grid& grid, const std::vector<Cell>&
                                       const std::vector<Cell>& goals_in,
                                       const RollingConfig& cfg,
                                       const GoalProvider& provider = {},
-                                      const ObstacleModel* obstacles = nullptr) {
+                                      const ObstacleModel* obstacles = nullptr,
+                                      const ProgressCallback& on_cycle = {}) {
     const auto start_time = std::chrono::steady_clock::now();
     const std::size_t n = starts.size();
     const bool lifelong = static_cast<bool>(provider);
@@ -179,6 +198,9 @@ inline RollingResult simulate_rolling(const Grid& grid, const std::vector<Cell>&
             break;
         }
 
+        const auto cycle_start = std::chrono::steady_clock::now();
+        const std::size_t hist_len_before =
+            result.history.paths.empty() ? 0 : result.history.paths[0].size();
         const std::size_t clock = result.steps;  // global time at cycle start
 
         // Predicted obstacle occupancy over this cycle's window, forbidden
@@ -281,6 +303,32 @@ inline RollingResult simulate_rolling(const Grid& grid, const std::vector<Cell>&
         }
         ++cycle;
         result.cycles = cycle;
+
+        // Report this cycle's committed frames to a live listener (SSE).
+        if (on_cycle) {
+            RollingProgress prog;
+            prog.cycle = cycle - 1;
+            prog.step = result.steps;
+            prog.cycle_ms = std::chrono::duration<double, std::milli>(
+                                std::chrono::steady_clock::now() - cycle_start)
+                                .count();
+            prog.goals_reached = result.goals_reached;
+            prog.active = 0;
+            for (std::size_t a = 0; a < n; ++a)
+                if (!(cur[a] == goals[a])) ++prog.active;
+            // Slice the newly appended timesteps into per-step position frames.
+            const std::size_t hist_len_after = result.history.paths[0].size();
+            for (std::size_t t = hist_len_before; t < hist_len_after; ++t) {
+                std::vector<Cell> frame(n);
+                for (std::size_t a = 0; a < n; ++a) frame[a] = result.history.paths[a][t];
+                prog.frames.push_back(std::move(frame));
+            }
+            if (obstacles && obstacles->count() > 0) {
+                for (std::size_t o = 0; o < obstacles->count(); ++o)
+                    prog.obstacles.push_back(obstacles->at(o, result.steps));
+            }
+            on_cycle(prog);
+        }
     }
 
     result.wall_ms =

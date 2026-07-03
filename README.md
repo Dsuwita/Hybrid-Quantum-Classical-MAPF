@@ -5,10 +5,14 @@ A multithreaded simulated annealing library in C++20 for hard combinatorial opti
 Zero dependencies. Header-only core. Work in progress, built milestone by milestone (see PROJECT_SPEC.md for the full roadmap).
  
 ## Status
- 
-Done so far: the BQM problem container with exact Ising/QUBO conversion, exhaustively tested by enumerating all 2^n states of small random instances.
- 
-Next up: the annealing engine, single-thread performance work, parallel restarts, and Max-Cut on standard Gset benchmark instances.
+
+Done: the annealing library (BQM with exact Ising/QUBO conversion, fast
+single-thread annealer, parallel restarts), Max-Cut and number
+partitioning with Gset benchmarks, the hybrid MAPF solver, rolling-horizon
+replanning with moving obstacles, and the interactive browser studio
+(Milestone 15) with a from-scratch CBS solver as the classical comparison,
+plus the performance benchmarks and dwave-neal comparison (Milestone 6).
+See `STATUS.md` for the per-milestone table.
  
 ## Quickstart
  
@@ -58,6 +62,87 @@ brute-force correctness tests are in `bench/maxcut.md`.
 ./build/solve_maxcut data/gset/G1 --best 11624 --replicas 16 --sweeps 20000
 ```
 
+## Performance
+
+Three measurements characterize the solver: how fast the inner loop runs,
+how it scales across cores, and how solution quality grows with effort.
+
+**Throughput.** Each optimization from Isakov et al. (2015) was added one
+at a time, measuring single-thread spin-flip throughput after each on a
+random 3-regular graph (n=2000, +/-1 couplings). The full stack is about
+**10x** faster than the naive Milestone 2 baseline; every optimized
+configuration still reproduces the naive annealer's accept/reject
+decisions bit for bit (differential test).
+
+| config | flips/ns | speedup |
+|---|---|---|
+| naive baseline (M2) | 0.027 | 1.0x |
+| flat CSR storage | 0.048 | 1.8x |
+| + local field cache | 0.063 | 2.3x |
+| + downhill early-exit | 0.065 | 2.4x |
+| + acceptance lookup table | 0.174 | 6.4x |
+| + xoshiro256++ RNG | 0.280 | 10.3x |
+
+Full method and per-step analysis in `bench/opt_log.md`.
+
+**Scaling.** Independent parallel restarts scale near-linearly up to the
+physical core count, then flatten across hyperthreads (the hot loop is
+compute-bound, so two threads sharing a core do not double throughput).
+
+![thread scaling](bench/scaling.png)
+
+**Quality vs effort.** On a fixed instance, best energy from a single
+anneal improves with sweeps and flattens into the usual diminishing-
+returns curve; the band is the seed-to-seed spread over 10 seeds.
+
+![quality vs sweeps](bench/quality.png)
+
+Regenerate with `./build/bench_scaling`, `./build/bench_quality`, and the
+`bench/plot_*.py` scripts (plotting needs matplotlib).
+
+### Versus dwave-neal
+
+`neal` is D-Wave's open-source SimulatedAnnealingSampler, the standard
+reference for Ising/QUBO simulated annealing. Running both on the same
+Gset instances with the same budget (16 restarts x 2000 sweeps): this
+solver is roughly **10-20x faster** in wall time, while neal reaches
+slightly higher cuts on the two hardest instances (it auto-tunes its
+temperature range per instance; ours uses a fixed geometric schedule). An
+honest split -- we win on speed, neal edges quality on the hard cases.
+
+| instance | n | best-known | ours cut | ours % | ours ms | neal cut | neal % | neal ms |
+|---|---|---|---|---|---|---|---|---|
+| G1  |  800 | 11624 | 11624 | 100.00% |  34 | 11624 | 100.00% |  786 |
+| G22 | 2000 | 13359 | 13348 |  99.92% |  82 | 13358 |  99.99% | 1382 |
+| G39 | 2000 |  2408 |  2357 |  97.88% | 102 |  2386 |  99.09% | 1261 |
+| G55 | 5000 | 10294 | 10056 |  97.69% | 281 | 10270 |  99.77% | 2533 |
+
+Reproduce with `pip install dwave-neal` then `python3 bench/neal_compare.py`
+(writes `bench/neal.md`).
+
+### Advanced samplers (Milestone 7)
+
+Two optional additions explore alternatives to plain cooled restarts, each
+correctness-tested against brute force and benchmarked honestly.
+
+**Parallel tempering** (`include/anneal/parallel_tempering.hpp`) runs
+replicas on a fixed hot-to-cold temperature ladder and swaps adjacent rungs
+with the Metropolis exchange rule, so a trapped configuration can ride up to
+a hot replica and escape. It finds the exact ground state on every
+brute-forceable instance tested. On Gset G39 at a matched budget, though,
+independent restarts reached a slightly higher cut in less wall time
+(`bench/tempering.md`): parallel tempering pays off mainly on harder spin
+glasses with tuned ladders and long runs, which is an honest negative result
+at this project's budget.
+
+**Multi-spin coding** (`include/anneal/multispin.hpp`) packs 64 replicas into
+one uint64_t per spin and updates all 64 with bitwise operations (the "an_ms"
+codes; +/-1 couplings, zero field). The per-lane unsatisfied-edge count is a
+bit-sliced integer sum and acceptance is a bit-sliced fixed-point compare;
+the arithmetic is verified against a scalar recomputation for all 64 lanes.
+It runs 64 replicas about **3.4x faster** than 64 sequential scalar runs on a
+random 3-regular instance (`bench/opt_log.md`).
+
 ## Multi-Agent Path Finding (Project 2)
 
 The downstream application: route many agents across a grid to their
@@ -69,24 +154,64 @@ one path per agent; the annealer solves it; the plan is verified, and any
 remaining conflicts trigger reservation-guided replanning and another
 anneal.
 
-### Interactive GUI
+### Interactive studio (Milestone 15)
 
-`mapf/viz/serve.py` is a small local web app (standard-library HTTP
-server, no dependencies) for building and solving MAPF instances by hand:
+`mapf/viz/serve.py` is a local web app (standard-library HTTP server, no
+dependencies) that wraps the compiled C++ solvers in a three-tab browser
+studio. No solver logic lives in the browser or the server; both are a
+thin API layer over the same binaries the CLIs use.
 
 ```
-cmake -S . -B build && cmake --build build   # so the server can call solve_mapf
+cmake -S . -B build && cmake --build build   # builds the solvers the studio calls
 python3 mapf/viz/serve.py                     # opens http://localhost:8000
 ```
 
-In the browser you can load a bundled map or a demo scenario, or draw
-your own: click to place agent start/goal pairs, toggle obstacles, and
-set the annealer budget. Press Solve and the server runs the compiled
-`solve_mapf` on your instance and streams the plan back; the canvas then
-animates it with play, pause, step, scrub, speed, and loop controls, and
-shows sum-of-costs, overhead, conflicts, and wall time. A Download GIF
-button exports the current plan (that step needs matplotlib on the
-server; everything else is dependency-free).
+**Tab 1 - MAPF solver.** Pick a map (`data/maps/`) and scenario
+(`data/scenarios/`), set the agent count, and run the hybrid annealer,
+the classical solver, or both side by side. The hybrid runs in
+rolling-horizon mode and streams to the browser over Server-Sent Events:
+the canvas animates the agents moving as the solver commits each window,
+rather than waiting for a finished plan. With both solvers selected the
+canvas splits (hybrid left, classical right) on a shared playback clock
+and the metrics panel shows a side-by-side table with a "better" column.
+Moving obstacles (scripted patrols or random walks) can be toggled on;
+predicted obstacle cells are dodged live. An Export GIF button renders the
+current plan through `render_plan.py` (needs matplotlib on the server;
+everything else is dependency-free).
+
+The classical comparison solver is **Conflict-Based Search (CBS)**,
+implemented from scratch in `mapf/cbs.hpp` (Sharon et al., AIJ 2015). CBS
+is optimal for sum-of-costs, so "overhead vs CBS optimal" is a meaningful
+quality metric; its correctness is checked against an exhaustive
+joint-space brute force on small instances in `tests/test_cbs.cpp`. On
+congested maps CBS runs under a wall-clock deadline and returns its best
+partial plan rather than hanging.
+
+**Tab 2 - Annealer lab.** Run simulated annealing on number partitioning
+or Max-Cut and watch the best energy fall live. Up to five runs' energy
+trajectories overlay so different `T0` / cooling / sweep-budget choices
+are directly comparable; a quality-vs-sweeps scatter accumulates across
+runs to show the diminishing-returns curve, and a speedup bar reports
+measured wall-time speedup when threads > 1.
+
+**Tab 3 - Max-Cut.** The annealer versus classical multi-start 1-opt on a
+Gset instance: cut value, percent of best-known, and wall time side by
+side, with a bar chart and a "run sweep" button that scatters instance
+size against the quality gap.
+
+Backend API: `GET /api/maps`, `GET /api/scenarios?map=`, `POST /api/solve`
+and `POST /api/anneal` (start a background job, return a `job_id`),
+`GET /api/status|result/{id}`, `POST /api/cancel/{id}`, and
+`GET /api/stream/{id}` (the Server-Sent Events feed). The C++ solvers
+`solve_stream` and `anneal_stream` emit newline-delimited JSON that the
+server forwards as SSE.
+
+The three tabs, driven by a headless browser (regenerate with
+`python3 mapf/viz/screenshots.py`):
+
+![MAPF studio: hybrid vs CBS side by side](mapf/viz/studio_mapf.png)
+![Annealer lab: overlaid energy curves and partition piles](mapf/viz/studio_lab.png)
+![Max-Cut: annealer vs classical on a Gset instance](mapf/viz/studio_maxcut.png)
 
 ### Static GIFs
 
@@ -168,3 +293,47 @@ The solver prints success, sum-of-costs, overhead versus the sum of
 per-agent shortest paths, and wall time. Every reported result is
 re-checked by an independent verifier. Success rate versus number of
 agents on three maps is in `mapf/bench/results.md`.
+
+## Ising, QUBO, and the quantum-annealing connection
+
+The library speaks the same problem format as a quantum annealer. An Ising
+model has spins s_i in {-1, +1} and energy E(s) = sum_i h_i s_i + sum_{i<j}
+J_ij s_i s_j; the equivalent QUBO uses binary x_i in {0, 1}. This repo's
+`BQM` stores either form and converts between them exactly (verified by
+enumerating every state of small instances). A huge range of NP-hard
+problems have compact Ising/QUBO encodings -- Max-Cut, number
+partitioning, graph coloring, and many more are catalogued by Lucas
+(2014).
+
+That format is exactly what D-Wave's quantum annealers minimize in
+hardware: they relax a system of coupled qubits toward the ground state of
+a programmed Ising Hamiltonian. Simulated annealing (this project) is the
+classical counterpart -- it explores the same energy landscape with
+Metropolis spin flips and a cooling schedule instead of quantum
+tunnelling. Writing a problem as a BQM here means the same model could be
+handed to quantum hardware unchanged, which is why the solver is branded
+as a general Ising/QUBO optimizer rather than a one-problem tool.
+
+The MAPF application is a hybrid classical/quantum-style decomposition in
+that spirit (inspired by Gerlach et al., ICML 2025): classical search
+generates structure (candidate paths, the conflict graph) and the annealer
+solves the compact QUBO subproblem of choosing one conflict-free path per
+agent. The same subproblem could be dispatched to a quantum annealer; here
+it runs on the classical solver in this repo.
+
+## References
+
+- Kirkpatrick, Gelatt, Vecchi, "Optimization by Simulated Annealing",
+  Science 1983 -- the annealing method itself.
+- Isakov, Zintchenko, Ronnow, Troyer, "Optimised simulated annealing for
+  Ising spin glasses", Comp. Phys. Comm. 2015 (arXiv:1401.1084) -- the
+  single-thread optimizations in `bench/opt_log.md`.
+- Lucas, "Ising formulations of many NP problems", Frontiers in Physics
+  2014 -- the Ising/QUBO problem encodings.
+- Sharon, Stern, Felner, Sturtevant, "Conflict-based search for optimal
+  multi-agent pathfinding", Artificial Intelligence 2015 -- the classical
+  CBS solver in `mapf/cbs.hpp`.
+- Li et al., "Lifelong Multi-Agent Path Finding in Large-Scale
+  Warehouses", AAAI 2021 -- the rolling-horizon (RHCR) replanning scheme.
+- Gerlach et al., "Hybrid Quantum-Classical Multi-Agent Pathfinding",
+  ICML 2025 -- the hybrid decomposition the MAPF solver follows.

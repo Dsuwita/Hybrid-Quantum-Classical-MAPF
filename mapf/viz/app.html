@@ -1,439 +1,762 @@
 <!DOCTYPE html>
 <!--
-  Interactive MAPF GUI (front end for serve.py).
+  Interactive studio (Milestone 15). A single-page app with three tabs over
+  the compiled C++ solvers, talking to serve.py:
 
-  Edit a grid (place agents, toggle obstacles), press Solve to run the
-  real compiled solver on the server, then play/scrub/step the returned
-  plan on the canvas. Plain HTML + canvas + fetch; no build step. Served
-  at / by serve.py, which also provides the /api endpoints this calls.
+    1. MAPF studio    -- run the hybrid annealer and/or classical CBS on a
+                         map+scenario, watch agents move live via Server-Sent
+                         Events, compare side by side, export a GIF.
+    2. Annealer lab   -- stream a simulated-annealing trajectory and build
+                         intuition for the temperature/cooling/sweeps tradeoff.
+    3. Max-Cut        -- annealer vs classical local search on Gset instances.
+
+  No frameworks, no build step, no external JS. Canvas + SVG + fetch/EventSource.
 -->
 <html lang="en">
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>MAPF studio</title>
+<title>anneal studio</title>
 <style>
   :root { color-scheme: dark; }
   * { box-sizing: border-box; }
   body { margin: 0; font-family: system-ui, sans-serif; background: #14161a; color: #e6e8eb; }
-  header { padding: 12px 20px; border-bottom: 1px solid #2b303b; }
-  header h1 { margin: 0; font-size: 17px; }
-  header span { color: #7f8794; font-size: 12px; }
-  main { display: flex; gap: 18px; padding: 18px; align-items: flex-start; flex-wrap: wrap; }
-  #stage { background: #1c1f26; border-radius: 10px; padding: 12px; }
-  canvas { display: block; background: #0f1115; border-radius: 6px; cursor: crosshair; }
-  aside { width: 320px; display: flex; flex-direction: column; gap: 14px; }
-  .panel { background: #1c1f26; border: 1px solid #2b303b; border-radius: 10px; padding: 12px 14px; }
-  .panel h2 { margin: 0 0 8px; font-size: 13px; text-transform: uppercase;
-              letter-spacing: .04em; color: #8b93a0; }
-  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
-  button, select, input[type=number] {
+  header { padding: 12px 20px; border-bottom: 1px solid #2b303b; display: flex;
+           align-items: center; gap: 20px; }
+  header h1 { margin: 0; font-size: 16px; }
+  .tabs { display: flex; gap: 6px; }
+  .tab { padding: 7px 14px; border-radius: 7px 7px 0 0; cursor: pointer; font-size: 14px;
+         color: #aab2bd; border: 1px solid transparent; }
+  .tab.active { color: #e6e8eb; background: #1c1f26; border-color: #2b303b; border-bottom: none; }
+  .view { display: none; }
+  .view.active { display: block; }
+
+  .studio { display: grid; grid-template-columns: 270px 1fr 300px; gap: 14px; padding: 14px; }
+  .panel { background: #1c1f26; border: 1px solid #2b303b; border-radius: 10px; padding: 14px; }
+  .panel h2 { margin: 0 0 10px; font-size: 14px; color: #cdd3db; }
+  label.mini { font-size: 12px; color: #aab2bd; display: flex; flex-direction: column; gap: 3px;
+               margin-bottom: 10px; }
+  .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  select, input[type=number], input[type=text], button {
     background: #2b303b; color: #e6e8eb; border: 1px solid #3a4150; border-radius: 6px;
-    padding: 6px 10px; font-size: 13px;
-  }
-  button { cursor: pointer; }
-  button:hover:not(:disabled) { background: #353b48; }
-  button:disabled { opacity: .4; cursor: default; }
-  button.active { background: #3b5bdb; border-color: #3b5bdb; }
-  button.primary { background: #2f9e44; border-color: #2f9e44; font-weight: 600; }
-  button.primary:hover:not(:disabled) { background: #37b24d; }
-  label.mini { font-size: 12px; color: #aab2bd; display: flex; flex-direction: column; gap: 3px; }
-  input[type=number] { width: 78px; }
+    padding: 6px 9px; font-size: 13px; }
   input[type=range] { width: 100%; }
-  .agents { display: flex; flex-direction: column; gap: 5px; max-height: 150px; overflow-y: auto; }
-  .agent { display: flex; align-items: center; gap: 8px; font-size: 12px; }
-  .swatch { width: 12px; height: 12px; border-radius: 3px; flex: none; }
-  .agent button { padding: 1px 7px; font-size: 12px; }
-  .metrics { font-size: 13px; line-height: 1.7; }
-  .metrics b { color: #fff; }
-  .ok { color: #51cf66; } .bad { color: #ff6b6b; }
-  #status { font-size: 12px; color: #aab2bd; min-height: 16px; }
-  .hint { font-size: 12px; color: #7f8794; }
+  input[type=number] { width: 80px; }
+  button { cursor: pointer; }
+  button.primary { background: #2f9e44; border-color: #2f9e44; font-weight: 600; }
+  button.primary:disabled { opacity: .5; cursor: default; }
+  button.danger { background: #7a2c2c; border-color: #7a2c2c; }
+  .val { color: #e6e8eb; font-weight: 600; }
+  details { margin-bottom: 10px; } details summary { cursor: pointer; font-size: 13px; color: #cdd3db; }
+  canvas { display: block; background: #0f1115; border-radius: 8px; }
+  .canvas-wrap { display: flex; gap: 10px; justify-content: center; }
+  .canvas-col { text-align: center; }
+  .canvas-col .lbl { font-size: 12px; color: #aab2bd; margin-bottom: 4px; }
+  .playback { display: flex; gap: 8px; align-items: center; margin-top: 10px; justify-content: center;
+              flex-wrap: wrap; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: right; padding: 4px 6px; border-bottom: 1px solid #2b303b; }
+  th:first-child, td:first-child { text-align: left; }
+  .hybrid-c { color: #4dabf7; } .cbs-c { color: #ffa94d; }
+  .status { font-size: 12px; color: #aab2bd; min-height: 16px; margin-top: 6px; }
+  .metric-big { font-size: 13px; line-height: 1.9; }
+  .metric-big b { color: #e6e8eb; }
+  .hint { color: #7f8794; font-size: 12px; line-height: 1.5; }
+  .chk { display: flex; align-items: center; gap: 6px; font-size: 13px; margin-bottom: 6px; }
+  .lab-grid { display: grid; grid-template-columns: 260px 1fr; gap: 14px; padding: 14px; }
+  .chart-card { background: #1c1f26; border: 1px solid #2b303b; border-radius: 10px; padding: 12px;
+                margin-bottom: 14px; }
+  .chart-card h3 { margin: 0 0 8px; font-size: 13px; color: #cdd3db; }
 </style>
 </head>
 <body>
   <header>
-    <h1>MAPF studio</h1>
-    <span>edit a grid, solve it with the annealer, and play the result &nbsp;&middot;&nbsp;
-      <a href="/maxcut" style="color:#7f8794">Max-Cut: annealer vs classical &rarr;</a></span>
+    <h1>anneal studio</h1>
+    <div class="tabs">
+      <div class="tab active" data-view="mapf">MAPF solver</div>
+      <div class="tab" data-view="lab">Annealer lab</div>
+      <div class="tab" data-view="maxcut">Max-Cut</div>
+    </div>
   </header>
 
-  <main>
-    <div id="stage">
-      <canvas id="canvas" width="560" height="560"></canvas>
-      <div class="row" style="margin-top:10px; justify-content:center">
-        <button id="toStart" disabled>&#9198;</button>
-        <button id="stepBack" disabled>&#9664;</button>
-        <button id="play" disabled>&#9654;</button>
-        <button id="stepFwd" disabled>&#9654;&#9654;</button>
-        <button id="toEnd" disabled>&#9197;</button>
-        <label class="mini" style="flex-direction:row; align-items:center; gap:5px">
-          <input type="checkbox" id="loop" checked /> loop
-        </label>
+  <!-- ============================= TAB 1: MAPF ============================= -->
+  <section class="view active" id="view-mapf">
+    <div class="studio">
+      <!-- left controls -->
+      <div class="panel">
+        <h2>Problem</h2>
+        <label class="mini">Map
+          <select id="m-map"></select></label>
+        <label class="mini">Scenario
+          <select id="m-scen"></select></label>
+        <label class="mini">Agents: <span class="val" id="m-agents-v">8</span>
+          <input type="range" id="m-agents" min="1" max="40" value="8"></label>
+
+        <h2 style="margin-top:14px">Solvers</h2>
+        <div class="chk"><input type="checkbox" id="m-hybrid" checked>
+          <span class="hybrid-c">Hybrid annealer</span></div>
+        <div class="chk"><input type="checkbox" id="m-cbs">
+          <span class="cbs-c">Classical (CBS)</span></div>
+
+        <details>
+          <summary>Annealer parameters</summary>
+          <label class="mini">Sweeps: <span class="val" id="m-sweeps-v">4000</span>
+            <input type="range" id="m-sweeps" min="2" max="5" step="0.01" value="3.6">
+            <span class="hint">log scale 100 - 100000</span></label>
+          <label class="mini">Threads: <span class="val" id="m-threads-v">4</span>
+            <input type="range" id="m-threads" min="1" max="16" value="4"></label>
+          <div class="row">
+            <label class="mini">Window W <input type="number" id="m-window" value="8" min="2" max="32"></label>
+            <label class="mini">Commit E <input type="number" id="m-execute" value="3" min="1" max="16"></label>
+          </div>
+          <label class="mini">Cooling
+            <select id="m-schedule"><option value="geometric">geometric</option>
+              <option value="linear">linear</option></select></label>
+        </details>
+
+        <details>
+          <summary>Moving obstacles</summary>
+          <div class="chk"><input type="checkbox" id="m-obs-on"> enable</div>
+          <label class="mini">Count: <span class="val" id="m-obs-v">2</span>
+            <input type="range" id="m-obs" min="1" max="10" value="2"></label>
+          <label class="mini">Motion
+            <select id="m-motion"><option value="scripted">scripted (patrol)</option>
+              <option value="random">random walk</option></select></label>
+        </details>
+
+        <div class="row" style="margin-top:8px">
+          <button id="m-run" class="primary">Run</button>
+          <button id="m-stop" class="danger">Stop</button>
+          <button id="m-reset">Reset</button>
+        </div>
+        <div class="status" id="m-status">Pick a map and press Run.</div>
       </div>
-      <div class="row" style="margin-top:8px; justify-content:center">
-        <span class="hint">t</span>
-        <input type="range" id="scrub" min="0" max="0" step="0.02" value="0"
-               style="width:360px" disabled />
-        <span id="tlabel" class="hint" style="min-width:64px">-</span>
+
+      <!-- center canvas -->
+      <div class="panel">
+        <div class="canvas-wrap" id="m-canvas-wrap"></div>
+        <div class="playback">
+          <button id="pb-back">&#9664;|</button>
+          <button id="pb-play">&#9654;</button>
+          <button id="pb-fwd">|&#9654;</button>
+          <input type="range" id="pb-scrub" min="0" max="0" value="0" style="width:220px">
+          <span class="hint">t=<span id="pb-t">0</span>/<span id="pb-max">0</span></span>
+          <label class="hint">speed <input type="range" id="pb-speed" min="0.1" max="10" step="0.1" value="2" style="width:90px"></label>
+        </div>
+        <div class="row" style="margin-top:8px; justify-content:center">
+          <button id="m-gif">Export GIF</button>
+          <span class="hint" id="m-gif-status"></span>
+        </div>
+      </div>
+
+      <!-- right metrics -->
+      <div class="panel">
+        <h2>Metrics</h2>
+        <div id="m-metrics"><span class="hint">No run yet.</span></div>
+        <div class="chart-card" style="margin-top:12px">
+          <h3>Overhead % vs agent count</h3>
+          <canvas id="m-overhead-chart" width="270" height="150"></canvas>
+        </div>
       </div>
     </div>
+  </section>
 
-    <aside>
+  <!-- ============================= TAB 2: LAB ============================= -->
+  <section class="view" id="view-lab">
+    <div class="lab-grid">
       <div class="panel">
-        <h2>Scenario</h2>
+        <h2>Problem</h2>
+        <label class="mini">Type
+          <select id="l-problem">
+            <option value="partition">Number partitioning</option>
+            <option value="maxcut-random">Max-Cut (random G(n,p))</option>
+            <option value="maxcut-gset">Max-Cut (Gset)</option>
+          </select></label>
+        <label class="mini" id="l-n-wrap">Size N: <span class="val" id="l-n-v">24</span>
+          <input type="range" id="l-n" min="4" max="200" value="24"></label>
+        <label class="mini" id="l-p-wrap" style="display:none">Density p
+          <input type="number" id="l-p" value="0.5" min="0.05" max="1" step="0.05"></label>
+        <label class="mini" id="l-gset-wrap" style="display:none">Instance
+          <select id="l-gset"></select></label>
+
+        <h2 style="margin-top:14px">Annealer</h2>
+        <label class="mini">T0 <input type="number" id="l-t0" value="10" min="0.1" step="0.5"></label>
+        <label class="mini">Cooling
+          <select id="l-schedule"><option value="geometric">geometric (alpha)</option>
+            <option value="linear">linear (T_end)</option></select></label>
+        <label class="mini" id="l-alpha-wrap">alpha <input type="number" id="l-alpha" value="0.99" min="0.5" max="0.9999" step="0.001"></label>
+        <label class="mini" id="l-tend-wrap" style="display:none">T_end <input type="number" id="l-tend" value="0.01" min="0.0001" step="0.01"></label>
+        <label class="mini">Sweeps: <span class="val" id="l-sweeps-v">2000</span>
+          <input type="range" id="l-sweeps" min="1" max="5" step="0.01" value="3.3"></label>
+        <label class="mini">Threads: <span class="val" id="l-threads-v">1</span>
+          <input type="range" id="l-threads" min="1" max="16" value="1"></label>
+        <div class="row"><button id="l-run" class="primary">Run</button>
+          <button id="l-clear">Clear chart</button></div>
+        <div class="status" id="l-status"></div>
+      </div>
+
+      <div>
+        <div class="chart-card">
+          <h3>Best energy vs sweep (up to 5 runs overlaid)</h3>
+          <canvas id="l-energy" width="820" height="260"></canvas>
+        </div>
+        <div class="row" style="gap:14px; align-items:flex-start; flex-wrap:wrap">
+          <div class="chart-card" style="flex:1 1 380px">
+            <h3>Quality vs sweep budget (accumulates)</h3>
+            <canvas id="l-quality" width="400" height="200"></canvas>
+          </div>
+          <div class="chart-card" style="flex:1 1 380px">
+            <h3 id="l-extra-title">Partition piles / speedup</h3>
+            <canvas id="l-extra" width="400" height="200"></canvas>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================= TAB 3: MAXCUT ============================= -->
+  <section class="view" id="view-maxcut">
+    <div style="max-width:860px; margin:0 auto; padding:16px">
+      <div class="panel">
         <div class="row">
-          <button data-example="crossing">Crossing demo</button>
-          <button data-example="rooms">Rooms demo</button>
+          <label class="mini">Instance <select id="x-instance"></select></label>
+          <label class="mini">Sweeps <input type="number" id="x-sweeps" value="20000"></label>
+          <label class="mini">Replicas <input type="number" id="x-replicas" value="16"></label>
+          <label class="mini">Restarts <input type="number" id="x-restarts" value="200"></label>
+          <label class="mini">Seed <input type="number" id="x-seed" value="1"></label>
+          <button id="x-run" class="primary">Run both</button>
+          <button id="x-sweep">Run sweep (all)</button>
         </div>
-        <div class="row" style="margin-top:8px">
-          <select id="mapSelect"><option value="">-- load a map --</option></select>
-          <button id="loadMap">Load</button>
+        <div class="status" id="x-status"></div>
+      </div>
+      <div class="row" style="gap:14px; align-items:flex-start">
+        <div class="chart-card" style="flex:1 1 380px">
+          <h3>Result</h3>
+          <table id="x-table"><tbody></tbody></table>
         </div>
-        <div class="row" style="margin-top:8px">
-          <label class="mini">width <input type="number" id="newW" value="12" min="2" max="60"></label>
-          <label class="mini">height <input type="number" id="newH" value="12" min="2" max="60"></label>
-          <button id="blank">Blank grid</button>
+        <div class="chart-card" style="flex:1 1 380px">
+          <h3>Cut vs best-known</h3>
+          <canvas id="x-bar" width="400" height="180"></canvas>
         </div>
       </div>
-
-      <div class="panel">
-        <h2>Edit tool</h2>
-        <div class="row">
-          <button class="tool active" data-tool="agent">Add agent</button>
-          <button class="tool" data-tool="obstacle">Obstacle</button>
-          <button class="tool" data-tool="erase">Remove agent</button>
-        </div>
-        <div class="hint" style="margin-top:8px" id="toolHint">
-          Click a cell for the start, then another for the goal.
-        </div>
+      <div class="chart-card">
+        <h3>Sweep: instance size vs quality gap to best-known</h3>
+        <canvas id="x-scatter" width="820" height="220"></canvas>
       </div>
-
-      <div class="panel">
-        <h2>Agents (<span id="agentCount">0</span>)</h2>
-        <div class="agents" id="agentList"></div>
-        <div class="row" style="margin-top:8px">
-          <button id="clearAgents">Clear all</button>
-        </div>
-      </div>
-
-      <div class="panel">
-        <h2>Annealer budget</h2>
-        <div class="row">
-          <label class="mini">sweeps <input type="number" id="sweeps" value="3000" min="1" max="200000"></label>
-          <label class="mini">replicas <input type="number" id="replicas" value="12" min="1" max="64"></label>
-        </div>
-        <div class="row" style="margin-top:8px">
-          <label class="mini">candidates <input type="number" id="candidates" value="5" min="1" max="12"></label>
-          <label class="mini">iters <input type="number" id="iters" value="12" min="1" max="50"></label>
-          <label class="mini">seed <input type="number" id="seed" value="1" min="0"></label>
-        </div>
-        <div class="row" style="margin-top:12px">
-          <button id="solve" class="primary">Solve</button>
-          <button id="edit" disabled>Back to editing</button>
-          <button id="gif" disabled>Download GIF</button>
-        </div>
-        <div id="status" style="margin-top:8px"></div>
-      </div>
-
-      <div class="panel">
-        <h2>Result</h2>
-        <div class="metrics" id="metrics"><span class="hint">no plan yet</span></div>
-      </div>
-    </aside>
-  </main>
+    </div>
+  </section>
 
 <script>
 "use strict";
-
-const PALETTE = ["#4e79a7","#f28e2b","#59a14f","#e15759","#b07aa1","#76b7b2","#edc948",
-  "#ff9da7","#9c755f","#bab0ac","#86bcb6","#d37295","#8cd17d","#b6992d","#499894","#fabfd2"];
-const color = i => PALETTE[i % PALETTE.length];
-
-const S = {
-  w: 0, h: 0, blocked: [],
-  agents: [],          // {sx,sy,gx,gy}
-  pending: null,       // {x,y} start awaiting a goal
-  tool: "agent",
-  paths: null,         // solved plan: array of array of [x,y]
-  makespan: 0,
-  t: 0, playing: false, lastFrame: 0,
-  cell: 32,
-};
-
-const canvas = document.getElementById("canvas");
-const ctx = canvas.getContext("2d");
 const $ = id => document.getElementById(id);
+const api = {
+  getJSON: async u => (await fetch(u)).json(),
+  postJSON: async (u, b) => (await fetch(u, {method:"POST", headers:{"Content-Type":"application/json"},
+                             body: JSON.stringify(b)})).json(),
+};
+function agentColor(i, n) { return `hsl(${Math.round(360*i/Math.max(1,n))}, 70%, 60%)`; }
 
-// ---- grid setup ----------------------------------------------------------
-
-function setGrid(w, h, blocked) {
-  S.w = w; S.h = h;
-  S.blocked = blocked || Array.from({length: h}, () => Array(w).fill(false));
-  S.paths = null; S.pending = null; S.t = 0;
-  fit(); exitPlayMode(); draw();
-}
-function blankGrid(w, h) { setGrid(w, h, null); S.agents = []; renderAgents(); }
-
-function fit() {
-  const maxPx = 560;
-  S.cell = Math.max(8, Math.floor(maxPx / Math.max(S.w, S.h)));
-  canvas.width = S.w * S.cell;
-  canvas.height = S.h * S.cell;
-}
-
-// ---- drawing -------------------------------------------------------------
-
-function pos(a, ti) { const p = S.paths[a]; return ti < p.length ? p[ti] : p[p.length - 1]; }
-function lerp(a, tf) {
-  const t0 = Math.floor(tf), f = tf - t0;
-  const p0 = pos(a, t0), p1 = pos(a, t0 + 1);
-  return [p0[0] + (p1[0]-p0[0])*f, p0[1] + (p1[1]-p0[1])*f];
-}
-
-function draw() {
-  const c = S.cell;
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
-  for (let y = 0; y < S.h; y++) for (let x = 0; x < S.w; x++) {
-    ctx.fillStyle = S.blocked[y][x] ? "#05070a" : "#232732";
-    ctx.fillRect(x*c, y*c, c-1, c-1);
-  }
-  // agent markers: starts (ring) + goals (X), always shown
-  S.agents.forEach((a, i) => {
-    const col = color(i);
-    ctx.strokeStyle = col; ctx.lineWidth = 2;
-    ctx.beginPath(); ctx.arc((a.sx+0.5)*c, (a.sy+0.5)*c, c*0.28, 0, 7); ctx.stroke();
-    const gx=(a.gx+0.5)*c, gy=(a.gy+0.5)*c, r=c*0.22;
-    ctx.beginPath();
-    ctx.moveTo(gx-r,gy-r); ctx.lineTo(gx+r,gy+r);
-    ctx.moveTo(gx+r,gy-r); ctx.lineTo(gx-r,gy+r); ctx.stroke();
-  });
-  // pending start highlight
-  if (S.pending) {
-    ctx.strokeStyle = "#ffd43b"; ctx.lineWidth = 2;
-    ctx.strokeRect(S.pending.x*c+1, S.pending.y*c+1, c-3, c-3);
-  }
-  // moving dots (only in play mode)
-  if (S.paths) {
-    S.agents.forEach((a, i) => {
-      const [px, py] = lerp(i, S.t);
-      ctx.fillStyle = color(i); ctx.strokeStyle = "#05070a"; ctx.lineWidth = 2;
-      ctx.beginPath(); ctx.arc((px+0.5)*c, (py+0.5)*c, c*0.34, 0, 7); ctx.fill(); ctx.stroke();
-    });
-    $("tlabel").textContent = `${S.t.toFixed(2)} / ${S.makespan}`;
-    $("scrub").value = S.t;
-  }
-}
-
-// ---- editing -------------------------------------------------------------
-
-function cellAt(ev) {
-  const r = canvas.getBoundingClientRect();
-  return { x: Math.floor((ev.clientX - r.left) / S.cell),
-           y: Math.floor((ev.clientY - r.top) / S.cell) };
-}
-canvas.addEventListener("click", ev => {
-  if (S.paths) return;               // no editing while a plan is loaded
-  const {x, y} = cellAt(ev);
-  if (x < 0 || y < 0 || x >= S.w || y >= S.h) return;
-
-  if (S.tool === "obstacle") {
-    if (S.agents.some(a => (a.sx===x&&a.sy===y)||(a.gx===x&&a.gy===y))) return;
-    S.blocked[y][x] = !S.blocked[y][x];
-  } else if (S.tool === "erase") {
-    S.agents = S.agents.filter(a => !((a.sx===x&&a.sy===y)||(a.gx===x&&a.gy===y)));
-    renderAgents();
-  } else { // agent
-    if (S.blocked[y][x]) return;
-    if (!S.pending) S.pending = {x, y};
-    else {
-      if (x === S.pending.x && y === S.pending.y) { S.pending = null; }
-      else { S.agents.push({sx:S.pending.x, sy:S.pending.y, gx:x, gy:y}); S.pending = null; renderAgents(); }
-    }
-  }
-  draw();
+// ---- tab switching ----
+document.querySelectorAll(".tab").forEach(t => t.onclick = () => {
+  document.querySelectorAll(".tab").forEach(x => x.classList.remove("active"));
+  document.querySelectorAll(".view").forEach(x => x.classList.remove("active"));
+  t.classList.add("active");
+  $("view-" + t.dataset.view).classList.add("active");
 });
 
-function renderAgents() {
-  $("agentCount").textContent = S.agents.length;
-  const list = $("agentList");
-  list.innerHTML = "";
-  S.agents.forEach((a, i) => {
-    const div = document.createElement("div");
-    div.className = "agent";
-    div.innerHTML = `<span class="swatch" style="background:${color(i)}"></span>` +
-      `<span>(${a.sx},${a.sy}) &rarr; (${a.gx},${a.gy})</span>`;
-    const b = document.createElement("button");
-    b.textContent = "remove";
-    b.onclick = () => { S.agents.splice(i,1); renderAgents(); draw(); };
-    div.appendChild(b);
-    list.appendChild(div);
-  });
-}
-
-// ---- playback ------------------------------------------------------------
-
-function enterPlayMode() {
-  ["toStart","stepBack","play","stepFwd","toEnd","scrub"].forEach(id => $(id).disabled = false);
-  $("edit").disabled = false; $("gif").disabled = false;
-  $("scrub").max = S.makespan;
-}
-function exitPlayMode() {
-  setPlaying(false);
-  ["toStart","stepBack","play","stepFwd","toEnd","scrub"].forEach(id => $(id).disabled = true);
-  $("edit").disabled = true; $("gif").disabled = true;
-  $("tlabel").textContent = "-";
-}
-function setPlaying(v) { S.playing = v; $("play").innerHTML = v ? "&#9208;" : "&#9654;"; }
-
-function frame(now) {
-  if (S.playing && S.paths) {
-    const dt = (now - S.lastFrame) / 1000;
-    S.t += dt * 3;
-    if (S.t >= S.makespan) {
-      if ($("loop").checked) S.t = 0; else { S.t = S.makespan; setPlaying(false); }
-    }
-    draw();
+/* =====================================================================
+   TAB 1: MAPF studio
+   ===================================================================== */
+const MapfTab = (() => {
+  // A "solve" holds everything needed to draw and score one solver's run.
+  // frames[t] = [[x,y] per agent]; obsFrames[t] = [[x,y] per obstacle].
+  function newSolve(key, color) {
+    return { key, color, grid:null, starts:[], goals:[], frames:[], obsFrames:[],
+             metrics:{}, done:false, es:null };
   }
-  S.lastFrame = now;
-  requestAnimationFrame(frame);
-}
+  let solves = {};        // key -> solve
+  let clock = 0, playing = false, lastTick = 0;
+  let overheadRuns = [];  // {agents, hybrid?, cbs?}
 
-$("play").onclick = () => { if (S.paths) setPlaying(!S.playing); };
-$("toStart").onclick = () => { setPlaying(false); S.t = 0; draw(); };
-$("toEnd").onclick = () => { setPlaying(false); S.t = S.makespan; draw(); };
-$("stepFwd").onclick = () => { setPlaying(false); S.t = Math.min(S.makespan, Math.floor(S.t)+1); draw(); };
-$("stepBack").onclick = () => { setPlaying(false); S.t = Math.max(0, Math.ceil(S.t)-1); draw(); };
-$("scrub").oninput = e => { setPlaying(false); S.t = parseFloat(e.target.value); draw(); };
+  function maxLen() {
+    let m = 1;
+    for (const k in solves) m = Math.max(m, solves[k].frames.length);
+    return m;
+  }
 
-// ---- tools + scenario loading -------------------------------------------
+  // ---- drawing ----
+  function drawSolve(s, canvas) {
+    const g = s.grid; if (!g) return;
+    const ctx = canvas.getContext("2d");
+    const cs = Math.floor(Math.min(canvas.width / g.w, canvas.height / g.h));
+    const ox = (canvas.width - cs*g.w)/2, oy = (canvas.height - cs*g.h)/2;
+    ctx.clearRect(0,0,canvas.width,canvas.height);
+    ctx.fillStyle = "#1a1d24"; ctx.fillRect(ox,oy,cs*g.w,cs*g.h);
+    ctx.fillStyle = "#3a4150";
+    for (const [x,y] of g.blocked) ctx.fillRect(ox+x*cs, oy+y*cs, cs, cs);
+    ctx.strokeStyle = "#22262f"; ctx.lineWidth = 1;
+    for (let x=0;x<=g.w;x++){ctx.beginPath();ctx.moveTo(ox+x*cs,oy);ctx.lineTo(ox+x*cs,oy+g.h*cs);ctx.stroke();}
+    for (let y=0;y<=g.h;y++){ctx.beginPath();ctx.moveTo(ox,oy+y*cs);ctx.lineTo(ox+g.w*cs,oy+y*cs);ctx.stroke();}
+    const n = s.starts.length;
+    for (let a=0;a<n;a++){
+      ctx.strokeStyle = agentColor(a,n); ctx.lineWidth = 2;
+      ctx.strokeRect(ox+s.goals[a][0]*cs+2, oy+s.goals[a][1]*cs+2, cs-4, cs-4);
+    }
+    const t = Math.min(clock, s.frames.length-1);
+    const frame = s.frames[t] || s.frames[s.frames.length-1];
+    const obs = s.obsFrames[Math.min(t, s.obsFrames.length-1)] || [];
+    ctx.fillStyle = "#ff6b6b";
+    for (const [x,y] of obs){
+      const cx=ox+x*cs+cs/2, cy=oy+y*cs+cs/2, r=cs*0.38;
+      ctx.beginPath();ctx.moveTo(cx,cy-r);ctx.lineTo(cx+r,cy);ctx.lineTo(cx,cy+r);ctx.lineTo(cx-r,cy);
+      ctx.closePath();ctx.fill();
+    }
+    if (frame) for (let a=0;a<frame.length;a++){
+      const [x,y]=frame[a];
+      ctx.fillStyle=agentColor(a,n);
+      ctx.beginPath();ctx.arc(ox+x*cs+cs/2, oy+y*cs+cs/2, cs*0.36, 0, 7); ctx.fill();
+      if (cs>=12){ctx.fillStyle="#0f1115"; ctx.font=`${Math.floor(cs*0.5)}px system-ui`;
+        ctx.textAlign="center"; ctx.textBaseline="middle";
+        ctx.fillText(a, ox+x*cs+cs/2, oy+y*cs+cs/2);}
+    }
+  }
 
-document.querySelectorAll(".tool").forEach(btn => {
-  btn.onclick = () => {
-    document.querySelectorAll(".tool").forEach(b => b.classList.remove("active"));
-    btn.classList.add("active");
-    S.tool = btn.dataset.tool;
-    S.pending = null;
-    const hints = {
-      agent: "Click a cell for the start, then another for the goal.",
-      obstacle: "Click cells to toggle walls.",
-      erase: "Click an agent's start or goal to remove it.",
+  function layoutCanvases() {
+    const wrap = $("m-canvas-wrap"); wrap.innerHTML = "";
+    const active = Object.keys(solves);
+    const w = active.length > 1 ? 380 : 560;
+    for (const k of active) {
+      const col = document.createElement("div"); col.className = "canvas-col";
+      const lbl = document.createElement("div"); lbl.className = "lbl";
+      lbl.textContent = k === "hybrid" ? "Hybrid annealer" : "Classical CBS";
+      lbl.style.color = solves[k].color;
+      const cv = document.createElement("canvas"); cv.width = w; cv.height = 460;
+      cv.id = "cv-" + k;
+      col.appendChild(lbl); col.appendChild(cv); wrap.appendChild(col);
+    }
+  }
+  function redraw() {
+    for (const k in solves) { const cv = $("cv-"+k); if (cv) drawSolve(solves[k], cv); }
+    $("pb-t").textContent = clock; $("pb-max").textContent = maxLen()-1;
+    $("pb-scrub").max = Math.max(0, maxLen()-1); $("pb-scrub").value = clock;
+  }
+
+  // ---- playback loop ----
+  function tick(ts) {
+    if (playing) {
+      const speed = +$("pb-speed").value;
+      if (ts - lastTick > 400/speed) {
+        lastTick = ts;
+        if (clock < maxLen()-1) clock++; else { playing = false; $("pb-play").innerHTML="&#9654;"; }
+        redraw();
+      }
+    }
+    requestAnimationFrame(tick);
+  }
+  requestAnimationFrame(tick);
+
+  // ---- metrics ----
+  const fmt = v => v===undefined||v===null?"-":(typeof v==="number"? (Math.round(v*10)/10) : v);
+  function renderMetrics() {
+    const el = $("m-metrics");
+    const keys = Object.keys(solves);
+    if (!keys.length) { el.innerHTML = '<span class="hint">No run yet.</span>'; return; }
+    let html = "";
+    if (keys.length === 1) {
+      const s = solves[keys[0]], m = s.metrics;
+      html = `<div class="metric-big">
+        success <b>${m.success===undefined?"-":(m.success?"yes":"partial")}</b><br>
+        sum-of-costs <b>${fmt(m.sum_of_costs)}</b><br>
+        overhead <b>${fmt(m.overhead_pct)}%</b><br>
+        conflicts <b>${fmt(m.conflicts)}</b><br>
+        wall <b>${fmt(m.wall_ms)} ms</b>
+        ${m.cycle_ms!==undefined?`<br>last cycle <b>${fmt(m.cycle_ms)} ms</b>`:""}
+        ${m.expansions!==undefined?`<br>CBS nodes <b>${fmt(m.expansions)}</b>`:""}</div>`;
+    } else {
+      const h = solves.hybrid?solves.hybrid.metrics:{}, c = solves.cbs?solves.cbs.metrics:{};
+      const row = (label, hv, cv) => {
+        let d = "";
+        if (hv!==undefined && cv!==undefined && isFinite(hv) && isFinite(cv))
+          d = hv===cv ? "=" : (hv<cv?"hybrid":"cbs");
+        return `<tr><td>${label}</td><td class="hybrid-c">${fmt(hv)}</td>
+                <td class="cbs-c">${fmt(cv)}</td><td>${d}</td></tr>`;
+      };
+      html = `<table><tr><th>metric</th><th class="hybrid-c">hybrid</th>
+        <th class="cbs-c">CBS</th><th>better</th></tr>
+        ${row("SOC", h.sum_of_costs, c.sum_of_costs)}
+        ${row("overhead %", h.overhead_pct, c.overhead_pct)}
+        ${row("conflicts", h.conflicts, c.conflicts)}
+        ${row("wall ms", h.wall_ms, c.wall_ms)}</table>
+        <div class="hint" style="margin-top:6px">CBS is optimal for sum-of-costs, so it is the
+        quality reference; the hybrid trades a little quality for speed and parallelism.</div>`;
+    }
+    el.innerHTML = html;
+  }
+
+  function drawOverheadChart() {
+    const cv = $("m-overhead-chart"), ctx = cv.getContext("2d");
+    ctx.clearRect(0,0,cv.width,cv.height);
+    if (!overheadRuns.length) return;
+    const pad = 30, W=cv.width-pad-8, H=cv.height-pad-8;
+    const xs = overheadRuns.map(r=>r.agents);
+    const ys = overheadRuns.flatMap(r=>[r.hybrid,r.cbs].filter(v=>v!==undefined));
+    const xmax = Math.max(...xs,1), ymax = Math.max(...ys,1);
+    ctx.strokeStyle="#3a4150"; ctx.beginPath(); ctx.moveTo(pad,4); ctx.lineTo(pad,pad+H);
+    ctx.lineTo(pad+W,pad+H); ctx.stroke();
+    ctx.fillStyle="#7f8794"; ctx.font="10px system-ui"; ctx.textAlign="right";
+    ctx.fillText(ymax.toFixed(0)+"%", pad-3, 10); ctx.fillText("0", pad-3, pad+H);
+    const px = a => pad + W*a/xmax, py = v => 4 + H*(1 - v/ymax);
+    for (const key of ["hybrid","cbs"]) {
+      const pts = overheadRuns.filter(r=>r[key]!==undefined).sort((a,b)=>a.agents-b.agents);
+      if (!pts.length) continue;
+      ctx.strokeStyle = key==="hybrid"?"#4dabf7":"#ffa94d"; ctx.fillStyle=ctx.strokeStyle;
+      ctx.beginPath();
+      pts.forEach((p,i)=>{ const x=px(p.agents),y=py(p[key]); i?ctx.lineTo(x,y):ctx.moveTo(x,y);
+        ctx.fillRect(x-2,y-2,4,4); });
+      ctx.stroke();
+    }
+  }
+
+  // ---- stream events ----
+  function handleEvent(key, ev) {
+    const s = solves[key]; if (!s) return;
+    if (ev.event === "meta") {
+      s.grid = ev.grid;
+      s.starts = ev.agents.map(a=>[a.sx,a.sy]);
+      s.goals = ev.agents.map(a=>[a.gx,a.gy]);
+      s.frames = [ s.starts.map(c=>c.slice()) ];
+      s.obsFrames = [ (ev.obstacles||[]).map(c=>c.slice()) ];
+      layoutCanvases(); redraw();
+    } else if (ev.event === "cycle") {
+      for (const fr of ev.frames) { s.frames.push(fr); s.obsFrames.push(ev.obstacles||[]); }
+      s.metrics.cycle_ms = ev.cycle_ms; s.metrics.overhead_pct = ev.overhead_pct;
+      s.metrics.active = ev.active;
+      clock = s.frames.length-1;   // follow the live edge
+      redraw(); renderMetrics();
+      $("m-status").textContent = `hybrid: t=${ev.timestep}, ${ev.active} active, cycle ${fmt(ev.cycle_ms)} ms`;
+    } else if (ev.event === "done") {
+      s.done = true;
+      if (ev.paths && ev.paths.length) {
+        const T = Math.max(...ev.paths.map(p=>p.length));
+        s.frames = [];
+        for (let t=0;t<T;t++) s.frames.push(ev.paths.map(p=>p[Math.min(t,p.length-1)]));
+      }
+      if (ev.obstacle_paths && ev.obstacle_paths.length) {
+        const T = s.frames.length;
+        s.obsFrames = [];
+        for (let t=0;t<T;t++) s.obsFrames.push(ev.obstacle_paths.map(p=>p[Math.min(t,p.length-1)]));
+      }
+      s.metrics = Object.assign(s.metrics, {
+        success: ev.success, sum_of_costs: ev.sum_of_costs, overhead_pct: ev.overhead_pct,
+        conflicts: ev.conflicts, wall_ms: ev.wall_ms, expansions: ev.expansions });
+      recordOverhead();
+      redraw(); renderMetrics(); maybeAllDone();
+    }
+  }
+  function recordOverhead() {
+    const agents = +$("m-agents").value;
+    let run = overheadRuns.find(r=>r.agents===agents);
+    if (!run) { run = {agents}; overheadRuns.push(run); }
+    for (const k in solves) if (solves[k].done) run[k] = solves[k].metrics.overhead_pct;
+    drawOverheadChart();
+  }
+  function maybeAllDone() {
+    if (Object.keys(solves).length && Object.values(solves).every(s=>s.done)) {
+      $("m-run").disabled = false; $("m-status").textContent = "done.";
+    }
+  }
+
+  async function run() {
+    stop(); solves = {};
+    const map = $("m-map").value, scen = $("m-scen").value;
+    if (!map || !scen) { $("m-status").textContent="pick a map and scenario"; return; }
+    const num_agents = +$("m-agents").value;
+    const sweeps = Math.round(Math.pow(10, +$("m-sweeps").value));
+    const params = { sweeps, threads:+$("m-threads").value, window:+$("m-window").value,
+      execute:+$("m-execute").value, schedule:$("m-schedule").value, seed:1 };
+    if ($("m-obs-on").checked) { params.obstacles=+$("m-obs").value; params.motion=$("m-motion").value; }
+    const chosen = [];
+    if ($("m-hybrid").checked) chosen.push(["hybrid","#4dabf7"]);
+    if ($("m-cbs").checked) chosen.push(["cbs","#ffa94d"]);
+    if (!chosen.length) { $("m-status").textContent="select at least one solver"; return; }
+    $("m-run").disabled = true; $("m-status").textContent = "starting..."; clock = 0;
+    for (const [key,color] of chosen) {
+      solves[key] = newSolve(key, color);
+      const {job_id} = await api.postJSON("/api/solve", {map, scenario:scen, num_agents, solver:key, params});
+      const es = new EventSource("/api/stream/"+job_id);
+      solves[key].es = es; solves[key].job = job_id;
+      es.onmessage = e => handleEvent(key, JSON.parse(e.data));
+      es.addEventListener("end", () => es.close());
+      es.onerror = () => es.close();
+    }
+    layoutCanvases();
+  }
+  function stop() {
+    for (const k in solves) { if (solves[k].es) solves[k].es.close();
+      if (solves[k].job) api.postJSON("/api/cancel/"+solves[k].job, {}); }
+    playing = false; $("pb-play").innerHTML="&#9654;"; $("m-run").disabled=false;
+  }
+  function reset() { stop(); solves={}; clock=0; $("m-canvas-wrap").innerHTML="";
+    renderMetrics(); $("m-status").textContent="reset."; }
+
+  async function exportGif() {
+    const key = solves.hybrid ? "hybrid" : Object.keys(solves)[0];
+    const s = solves[key];
+    if (!s || !s.frames.length) { $("m-gif-status").textContent="run first"; return; }
+    $("m-gif-status").textContent = "rendering...";
+    const n = s.frames[0].length, paths = [];
+    for (let a=0;a<n;a++) paths.push(s.frames.map(f=>f[a]));
+    const r = await fetch("/api/gif", {method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({grid:s.grid, paths})});
+    if (r.headers.get("Content-Type")==="image/gif") {
+      const blob = await r.blob(), url = URL.createObjectURL(blob);
+      const a = document.createElement("a"); a.href=url; a.download="plan.gif"; a.click();
+      $("m-gif-status").textContent = "downloaded plan.gif";
+    } else { const j = await r.json(); $("m-gif-status").textContent = j.error||"failed"; }
+  }
+
+  async function loadScenarios() {
+    const {scenarios} = await api.getJSON("/api/scenarios?map="+encodeURIComponent($("m-map").value));
+    const ssel = $("m-scen"); ssel.innerHTML="";
+    if (!scenarios.length) { ssel.innerHTML='<option value="">(no scenario)</option>'; return; }
+    scenarios.forEach(s => { const o=document.createElement("option"); o.value=s.path;
+      o.textContent=`${s.name} (${s.agents} agents)`; ssel.appendChild(o); });
+    $("m-agents").max = Math.min(40, scenarios[0].agents);
+  }
+  async function init() {
+    const {maps} = await api.getJSON("/api/maps");
+    const msel = $("m-map"); msel.innerHTML = "";
+    maps.forEach(m => { const o=document.createElement("option"); o.value=m.path;
+      o.textContent=`${m.name} (${m.w}x${m.h})`; msel.appendChild(o); });
+    msel.onchange = loadScenarios; await loadScenarios();
+    $("m-agents").oninput = e => $("m-agents-v").textContent = e.target.value;
+    $("m-sweeps").oninput = e => $("m-sweeps-v").textContent = Math.round(Math.pow(10,+e.target.value));
+    $("m-threads").oninput = e => $("m-threads-v").textContent = e.target.value;
+    $("m-obs").oninput = e => $("m-obs-v").textContent = e.target.value;
+    $("m-run").onclick = run; $("m-stop").onclick = stop; $("m-reset").onclick = reset;
+    $("m-gif").onclick = exportGif;
+    $("pb-play").onclick = () => { playing=!playing;
+      $("pb-play").innerHTML = playing?"&#10074;&#10074;":"&#9654;"; };
+    $("pb-fwd").onclick = () => { if(clock<maxLen()-1){clock++;redraw();} };
+    $("pb-back").onclick = () => { if(clock>0){clock--;redraw();} };
+    $("pb-scrub").oninput = e => { clock=+e.target.value; redraw(); };
+  }
+  return { init };
+})();
+
+/* =====================================================================
+   TAB 2: Annealer lab
+   ===================================================================== */
+const LabTab = (() => {
+  let runs = [];            // {sweeps:[{sweep,best_energy}], color}
+  let quality = [];         // {sweeps, energy}
+  const palette = ["#4dabf7","#ffa94d","#51cf66","#ff6b6b","#cc5de8"];
+  let es = null;
+
+  function drawEnergy() {
+    const cv = $("l-energy"), ctx = cv.getContext("2d");
+    ctx.clearRect(0,0,cv.width,cv.height);
+    const pad=40, W=cv.width-pad-10, H=cv.height-pad-10;
+    const all = runs.flatMap(r=>r.sweeps);
+    if (!all.length) return;
+    const emax = Math.max(...all.map(p=>p.best_energy));
+    const emin = Math.min(...all.map(p=>p.best_energy));
+    const smax = Math.max(...all.map(p=>p.sweep),1);
+    ctx.strokeStyle="#3a4150"; ctx.beginPath(); ctx.moveTo(pad,6); ctx.lineTo(pad,pad+H);
+    ctx.lineTo(pad+W,pad+H); ctx.stroke();
+    ctx.fillStyle="#7f8794"; ctx.font="10px system-ui"; ctx.textAlign="right";
+    ctx.fillText(emax.toFixed(0), pad-4, 12); ctx.fillText(emin.toFixed(0), pad-4, pad+H);
+    ctx.textAlign="center"; ctx.fillText("sweep", pad+W/2, pad+H+16);
+    const px = s => pad + W*s/smax;
+    const py = e => 6 + H*(emax===emin?0.5:(emax-e)/(emax-emin));
+    runs.forEach(r => {
+      ctx.strokeStyle=r.color; ctx.lineWidth=1.5; ctx.beginPath();
+      r.sweeps.forEach((p,i)=>{const x=px(p.sweep),y=py(p.best_energy); i?ctx.lineTo(x,y):ctx.moveTo(x,y);});
+      ctx.stroke();
+    });
+  }
+  function drawQuality() {
+    const cv=$("l-quality"), ctx=cv.getContext("2d"); ctx.clearRect(0,0,cv.width,cv.height);
+    if (!quality.length) return;
+    const pad=40,W=cv.width-pad-10,H=cv.height-pad-10;
+    const sx=quality.map(q=>Math.log10(Math.max(1,q.sweeps)));
+    const smin=Math.min(...sx),smax=Math.max(...sx,smin+0.1);
+    const emin=Math.min(...quality.map(q=>q.energy)),emax=Math.max(...quality.map(q=>q.energy),emin+1);
+    ctx.strokeStyle="#3a4150";ctx.beginPath();ctx.moveTo(pad,6);ctx.lineTo(pad,pad+H);
+    ctx.lineTo(pad+W,pad+H);ctx.stroke();
+    ctx.fillStyle="#7f8794";ctx.font="10px system-ui";ctx.textAlign="center";
+    ctx.fillText("log10 sweeps",pad+W/2,pad+H+16);
+    ctx.fillStyle="#51cf66";
+    quality.forEach(q=>{const x=pad+W*((Math.log10(Math.max(1,q.sweeps))-smin)/(smax-smin||1));
+      const y=6+H*((q.energy-emin)/(emax-emin||1)); ctx.beginPath();ctx.arc(x,y,3,0,7);ctx.fill();});
+  }
+  function drawExtra(problem, assign, speedup) {
+    const cv=$("l-extra"), ctx=cv.getContext("2d"); ctx.clearRect(0,0,cv.width,cv.height);
+    if (problem==="partition" && assign) {
+      $("l-extra-title").textContent = "Partition piles (best assignment)";
+      const left=[],right=[]; assign.forEach((s,i)=> (s>0?left:right).push(i));
+      const drawPile=(items,x0,color,label)=>{
+        ctx.fillStyle="#7f8794";ctx.font="11px system-ui";ctx.textAlign="center";
+        ctx.fillText(label+" ("+items.length+")", x0, 16);
+        ctx.fillStyle=color;
+        items.forEach((it,i)=>{ const w=24, h=8; const col=i%5, rowi=Math.floor(i/5);
+          ctx.fillRect(x0-2.5*w + col*(w+2), 185-rowi*(h+2)-h, w, h); });
+      };
+      drawPile(left, 110, "#4dabf7", "group A");
+      drawPile(right, 300, "#ffa94d", "group B");
+    } else {
+      $("l-extra-title").textContent = "Speedup (threads vs 1)";
+      ctx.fillStyle="#7f8794";ctx.font="12px system-ui";ctx.textAlign="left";
+      if (speedup>0) {
+        ctx.fillText(`measured speedup: ${speedup.toFixed(2)}x`, 20, 30);
+        ctx.fillStyle="#51cf66"; ctx.fillRect(20, 60, Math.min(360, 40*speedup), 30);
+      } else {
+        ctx.fillText("set threads > 1 to measure a speedup", 20, 30);
+      }
+    }
+  }
+
+  function run() {
+    if (es) es.close();
+    const problem = $("l-problem").value;
+    const params = { sweeps: Math.round(Math.pow(10,+$("l-sweeps").value)),
+      t0:+$("l-t0").value, schedule:$("l-schedule").value, alpha:+$("l-alpha").value,
+      t_end:+$("l-tend").value, seed: Math.floor(Math.random()*100000),
+      threads:+$("l-threads").value, points:200, n:+$("l-n").value, p:+$("l-p").value };
+    const body = {problem, params};
+    if (problem==="maxcut-gset") body.gset = $("l-gset").value;
+    const curRun = { sweeps:[], color: palette[runs.length % palette.length] };
+    runs.push(curRun); if (runs.length>5) runs.shift();
+    $("l-status").textContent = "running...";
+    api.postJSON("/api/anneal", body).then(({job_id}) => {
+      es = new EventSource("/api/stream/"+job_id);
+      es.onmessage = e => {
+        const ev = JSON.parse(e.data);
+        if (ev.event==="sweep") {
+          curRun.sweeps.push({sweep:ev.sweep, best_energy:ev.best_energy});
+          drawEnergy();
+          if (problem==="partition") drawExtra("partition", ev.assign, 0);
+        } else if (ev.event==="done") {
+          quality.push({sweeps: params.sweeps, energy: ev.best_energy});
+          drawQuality();
+          if (problem!=="partition") drawExtra(problem, null, ev.speedup);
+          $("l-status").textContent =
+            `done: energy ${ev.best_energy.toFixed(1)}, objective ${ev.objective.toFixed(1)}` +
+            (ev.speedup>0?`, ${ev.speedup.toFixed(2)}x on ${params.threads} threads`:"");
+        }
+      };
+      es.addEventListener("end", ()=>es.close());
+      es.onerror = ()=>es.close();
+    });
+  }
+
+  async function init() {
+    const upd = () => {
+      const p = $("l-problem").value;
+      $("l-n-wrap").style.display = p==="maxcut-gset"?"none":"flex";
+      $("l-p-wrap").style.display = p==="maxcut-random"?"flex":"none";
+      $("l-gset-wrap").style.display = p==="maxcut-gset"?"flex":"none";
+      $("l-n").max = p==="partition"?200:400;
     };
-    $("toolHint").textContent = hints[S.tool];
-    draw();
-  };
-});
-
-async function loadExample(name) {
-  const r = await fetch(`/api/example?name=${name}`);
-  const d = await r.json();
-  if (d.error) { setStatus(d.error, true); return; }
-  S.agents = d.agents;
-  setGrid(d.grid.w, d.grid.h, d.grid.blocked);
-  renderAgents();
-  setStatus(`loaded ${name}: ${d.agents.length} agents`);
-}
-document.querySelectorAll("[data-example]").forEach(b =>
-  b.onclick = () => loadExample(b.dataset.example));
-
-$("blank").onclick = () => {
-  const w = Math.max(2, Math.min(60, +$("newW").value));
-  const h = Math.max(2, Math.min(60, +$("newH").value));
-  blankGrid(w, h); setStatus(`blank ${w}x${h} grid`);
-};
-$("clearAgents").onclick = () => { S.agents = []; S.pending = null; renderAgents(); draw(); };
-$("loadMap").onclick = async () => {
-  const path = $("mapSelect").value;
-  if (!path) return;
-  const r = await fetch(`/api/map?path=${encodeURIComponent(path)}`);
-  const d = await r.json();
-  if (d.error) { setStatus(d.error, true); return; }
-  S.agents = [];
-  setGrid(d.grid.w, d.grid.h, d.grid.blocked);
-  renderAgents();
-  setStatus(`loaded ${path}`);
-};
-
-async function loadMapList() {
-  try {
-    const d = await (await fetch("/api/maps")).json();
-    const sel = $("mapSelect");
-    d.maps.forEach(m => {
-      const o = document.createElement("option"); o.value = m; o.textContent = m; sel.appendChild(o);
-    });
-  } catch (e) { /* server may be down; ignore */ }
-}
-
-// ---- solve + gif ---------------------------------------------------------
-
-function setStatus(msg, bad) { const s = $("status"); s.textContent = msg; s.className = bad ? "bad" : ""; }
-
-$("solve").onclick = async () => {
-  if (!S.agents.length) { setStatus("place at least one agent first", true); return; }
-  $("solve").disabled = true; setStatus("solving...");
-  const budget = {
-    sweeps:+$("sweeps").value, replicas:+$("replicas").value,
-    candidates:+$("candidates").value, iters:+$("iters").value, seed:+$("seed").value,
-  };
-  try {
-    const r = await fetch("/api/solve", {
-      method: "POST", headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({grid: {w:S.w, h:S.h, blocked:S.blocked}, agents:S.agents, budget}),
-    });
-    const d = await r.json();
-    if (d.error) { setStatus(d.error, true); $("solve").disabled = false; return; }
-    S.paths = d.paths;
-    S.makespan = Math.max(...S.paths.map(p => p.length - 1));
-    S.t = 0;
-    showMetrics(d);
-    enterPlayMode(); setPlaying(true);
-    setStatus(d.success ? "solved" : "no conflict-free plan found (showing best attempt)", !d.success);
-  } catch (e) {
-    setStatus("request failed: " + e, true);
-  } finally {
-    $("solve").disabled = false;
+    $("l-problem").onchange = upd; upd();
+    $("l-schedule").onchange = () => {
+      const geo = $("l-schedule").value==="geometric";
+      $("l-alpha-wrap").style.display = geo?"flex":"none";
+      $("l-tend-wrap").style.display = geo?"none":"flex";
+    };
+    $("l-n").oninput = e => $("l-n-v").textContent = e.target.value;
+    $("l-sweeps").oninput = e => $("l-sweeps-v").textContent = Math.round(Math.pow(10,+e.target.value));
+    $("l-threads").oninput = e => $("l-threads-v").textContent = e.target.value;
+    $("l-run").onclick = run;
+    $("l-clear").onclick = () => { runs=[]; quality=[]; drawEnergy(); drawQuality();
+      $("l-extra").getContext("2d").clearRect(0,0,400,200); };
+    const {instances} = await api.getJSON("/api/gset");
+    const g = $("l-gset"); instances.forEach(it=>{const o=document.createElement("option");
+      o.value=it.name; o.textContent=it.name; g.appendChild(o);});
   }
-};
+  return { init };
+})();
 
-function showMetrics(d) {
-  const m = d.metrics || {};
-  const ok = d.success;
-  $("metrics").innerHTML =
-    `<div>status: <b class="${ok?'ok':'bad'}">${ok?'success':'failed'}</b></div>` +
-    `<div>sum-of-costs: <b>${m['sum-of-costs']??'?'}</b> ` +
-    `(optimal ${m['sum-of-optimal']??'?'})</div>` +
-    `<div>overhead: <b>${m['overhead']??'?'}</b></div>` +
-    `<div>conflicts: <b>${m['conflicts']??'?'}</b></div>` +
-    `<div>iterations: <b>${m['iterations']??'?'}</b></div>` +
-    `<div>wall: <b>${m['wall_ms']??'?'} ms</b></div>`;
-}
+/* =====================================================================
+   TAB 3: Max-Cut comparison
+   ===================================================================== */
+const MaxcutTab = (() => {
+  let scatter = [];  // {size, gap}
+  function drawBar(r) {
+    const cv=$("x-bar"), ctx=cv.getContext("2d"); ctx.clearRect(0,0,cv.width,cv.height);
+    if (!r) return;
+    const best = r.best||Math.max(r.annealer.cut,r.classical.cut);
+    const items=[["annealer",r.annealer.cut,"#4dabf7"],["classical",r.classical.cut,"#ffa94d"]];
+    const base=140;
+    ctx.strokeStyle="#3a4150"; ctx.beginPath(); ctx.moveTo(60,base-100); ctx.lineTo(cv.width-10,base-100); ctx.stroke();
+    ctx.fillStyle="#7f8794"; ctx.font="10px system-ui"; ctx.textAlign="left";
+    ctx.fillText("best "+best, 60, base-104);
+    items.forEach(([lbl,cut,col],i)=>{ const h=100*cut/best; ctx.fillStyle=col;
+      ctx.fillRect(90+i*150, base-h, 90, h);
+      ctx.fillStyle="#e6e8eb"; ctx.textAlign="center"; ctx.font="11px system-ui";
+      ctx.fillText(lbl, 135+i*150, base+14); ctx.fillText(cut, 135+i*150, base-h-4); });
+  }
+  function drawScatter() {
+    const cv=$("x-scatter"), ctx=cv.getContext("2d"); ctx.clearRect(0,0,cv.width,cv.height);
+    if (!scatter.length) return;
+    const pad=40,W=cv.width-pad-10,H=cv.height-pad-10;
+    const xmax=Math.max(...scatter.map(s=>s.size),1), ymax=Math.max(...scatter.map(s=>s.gap),0.1);
+    ctx.strokeStyle="#3a4150";ctx.beginPath();ctx.moveTo(pad,6);ctx.lineTo(pad,pad+H);
+    ctx.lineTo(pad+W,pad+H);ctx.stroke();
+    ctx.fillStyle="#7f8794";ctx.font="10px system-ui";ctx.textAlign="center";
+    ctx.fillText("instance size (nodes)",pad+W/2,pad+H+16); ctx.textAlign="right";
+    ctx.fillText(ymax.toFixed(1)+"%",pad-4,12);
+    scatter.forEach(s=>{const x=pad+W*s.size/xmax,y=6+H*(1-s.gap/ymax);
+      ctx.fillStyle="#4dabf7";ctx.beginPath();ctx.arc(x,y,4,0,7);ctx.fill();});
+  }
+  async function runOne(instance) {
+    const budget={sweeps:+$("x-sweeps").value, replicas:+$("x-replicas").value,
+      restarts:+$("x-restarts").value, seed:+$("x-seed").value};
+    const r = await api.postJSON("/api/maxcut",{instance,budget});
+    if (r.error) { $("x-status").textContent=r.error; return null; }
+    return r;
+  }
+  async function run() {
+    const instance=$("x-instance").value; if(!instance){$("x-status").textContent="pick instance";return;}
+    $("x-run").disabled=true; $("x-status").textContent="solving both...";
+    const r = await runOne(instance);
+    $("x-run").disabled=false;
+    if (!r) return;
+    const pct = v => r.best? (100*v/r.best).toFixed(2)+"%":"n/a";
+    $("x-table").querySelector("tbody").innerHTML =
+      `<tr><th>solver</th><th>cut</th><th>% best</th><th>wall ms</th></tr>
+       <tr><td class="hybrid-c">annealer</td><td>${r.annealer.cut}</td><td>${pct(r.annealer.cut)}</td>
+         <td>${r.annealer.wall_ms.toFixed(0)}</td></tr>
+       <tr><td class="cbs-c">classical</td><td>${r.classical.cut}</td><td>${pct(r.classical.cut)}</td>
+         <td>${r.classical.wall_ms.toFixed(0)}</td></tr>`;
+    drawBar(r);
+    if (r.best) { const gap=100*(r.best-Math.max(r.annealer.cut,r.classical.cut))/r.best;
+      scatter.push({size:r.nodes, gap:Math.max(0,gap)}); drawScatter(); }
+    $("x-status").textContent=`done: ${r.nodes} nodes, ${r.edges} edges`;
+  }
+  async function runSweep() {
+    const {instances} = await api.getJSON("/api/gset");
+    $("x-run").disabled=true;
+    for (const it of instances) {
+      $("x-status").textContent = "sweep: "+it.name+"...";
+      const r = await runOne(it.name);
+      if (r && r.best) { const gap=100*(r.best-Math.max(r.annealer.cut,r.classical.cut))/r.best;
+        scatter.push({size:r.nodes, gap:Math.max(0,gap)}); drawScatter(); }
+    }
+    $("x-run").disabled=false; $("x-status").textContent="sweep done.";
+  }
+  async function init() {
+    const {instances} = await api.getJSON("/api/gset");
+    const sel=$("x-instance"); sel.innerHTML="";
+    if (!instances.length) sel.innerHTML='<option value="">(run data/download_gset.sh)</option>';
+    instances.forEach(it=>{const o=document.createElement("option"); o.value=it.name;
+      o.textContent=it.best?`${it.name} (best ${it.best})`:it.name; sel.appendChild(o);});
+    $("x-run").onclick=run; $("x-sweep").onclick=runSweep;
+  }
+  return { init };
+})();
 
-$("edit").onclick = () => { S.paths = null; exitPlayMode(); draw(); setStatus("editing"); };
-
-$("gif").onclick = async () => {
-  if (!S.paths) return;
-  setStatus("rendering GIF...");
-  try {
-    const r = await fetch("/api/gif", {
-      method: "POST", headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({grid: {w:S.w, h:S.h, blocked:S.blocked}, paths: S.paths}),
-    });
-    if (!r.ok) { const d = await r.json(); setStatus(d.error || "gif failed", true); return; }
-    const blob = await r.blob();
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url; a.download = "plan.gif"; a.click();
-    URL.revokeObjectURL(url);
-    setStatus("GIF downloaded");
-  } catch (e) { setStatus("gif request failed: " + e, true); }
-};
-
-// ---- boot ----------------------------------------------------------------
-
-loadMapList();
-blankGrid(12, 12);
-setStatus("ready -- load a demo or place agents, then Solve");
-requestAnimationFrame(frame);
+MapfTab.init(); LabTab.init(); MaxcutTab.init();
 </script>
 </body>
 </html>
