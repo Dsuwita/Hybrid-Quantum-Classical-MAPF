@@ -49,16 +49,19 @@ struct ParallelResult {
 template <typename Schedule, typename Rng = std::mt19937_64>
 class ParallelAnnealer {
 public:
-    // num_threads = 0 means "use hardware_concurrency".
+    // num_threads = 0 means "use hardware_concurrency". max_wall_ms > 0
+    // makes each replica anytime: it stops at that per-replica deadline and
+    // contributes its best-so-far. Used by the rolling-horizon MAPF driver.
     ParallelAnnealer(const BQM& bqm, Schedule schedule, std::size_t num_sweeps,
                      std::uint64_t seed_base, std::size_t num_replicas,
-                     std::size_t num_threads = 0)
+                     std::size_t num_threads = 0, double max_wall_ms = 0.0)
         : view_(bqm),
           schedule_(schedule),
           num_sweeps_(num_sweeps),
           seed_base_(seed_base),
           num_replicas_(num_replicas),
-          num_threads_(num_threads == 0 ? std::thread::hardware_concurrency() : num_threads) {}
+          num_threads_(num_threads == 0 ? std::thread::hardware_concurrency() : num_threads),
+          max_wall_ms_(max_wall_ms) {}
 
     ParallelResult solve() {
         ParallelResult out;
@@ -74,7 +77,7 @@ public:
                 const std::size_t r = next_replica.fetch_add(1, std::memory_order_relaxed);
                 if (r >= num_replicas_) return;
                 FastAnnealer<Schedule, Rng> annealer(view_, schedule_, num_sweeps_,
-                                                     seed_base_ + r);
+                                                     seed_base_ + r, max_wall_ms_);
                 out.replicas[r] = annealer.solve();
             }
         };
@@ -106,6 +109,7 @@ private:
     std::uint64_t seed_base_;
     std::size_t num_replicas_;
     std::size_t num_threads_;
+    double max_wall_ms_ = 0.0;
 };
 
 }  // namespace anneal
