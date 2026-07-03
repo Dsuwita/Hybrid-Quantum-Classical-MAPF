@@ -277,6 +277,7 @@ const MapfTab = (() => {
   let solves = {};        // key -> solve
   let clock = 0, playing = false, lastTick = 0;
   let overheadRuns = [];  // {agents, hybrid?, cbs?}
+  let sawCycle = false;   // did any solver stream live windows this run?
 
   function maxLen() {
     let m = 1;
@@ -428,6 +429,7 @@ const MapfTab = (() => {
       s.obsFrames = [ (ev.obstacles||[]).map(c=>c.slice()) ];
       layoutCanvases(); redraw();
     } else if (ev.event === "cycle") {
+      sawCycle = true;
       for (const fr of ev.frames) { s.frames.push(fr); s.obsFrames.push(ev.obstacles||[]); }
       s.metrics.cycle_ms = ev.cycle_ms; s.metrics.overhead_pct = ev.overhead_pct;
       s.metrics.active = ev.active;
@@ -463,6 +465,10 @@ const MapfTab = (() => {
   function maybeAllDone() {
     if (Object.keys(solves).length && Object.values(solves).every(s=>s.done)) {
       $("m-run").disabled = false; $("m-status").textContent = "done.";
+      // If nothing streamed live windows (static hybrid and/or CBS), play the
+      // finished plan back from the start so agents visibly move on the canvas.
+      if (!sawCycle && maxLen() > 1) { clock = 0; playing = true;
+        $("pb-play").innerHTML = "&#10074;&#10074;"; }
     }
   }
 
@@ -480,6 +486,7 @@ const MapfTab = (() => {
     if ($("m-cbs").checked) chosen.push(["cbs","#ffa94d"]);
     if (!chosen.length) { $("m-status").textContent="select at least one solver"; return; }
     $("m-run").disabled = true; $("m-status").textContent = "starting..."; clock = 0;
+    sawCycle = false;
     for (const [key,color] of chosen) {
       solves[key] = newSolve(key, color);
       const {job_id} = await api.postJSON("/api/solve", {map, scenario:scen, num_agents, solver:key, params});
