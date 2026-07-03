@@ -1,18 +1,18 @@
 # Description
 
-A multithreaded simulated annealing library in C++20 for hard combinatorial optimization problems, using the Ising/QUBO model format of quantum annealers. Includes a planned downstream application: a hybrid Multi-Agent Path Finding solver built on the library.
+A multithreaded simulated annealing library in C++20 for hard combinatorial optimization problems, using the Ising/QUBO model format of quantum annealers. Includes a downstream application: a hybrid Multi-Agent Path Finding solver built on the library.
  
-Zero dependencies. Header-only core. Work in progress, built milestone by milestone (see PROJECT_SPEC.md for the full roadmap).
+Zero dependencies. Header-only core.
  
 ## Status
 
-Done: the annealing library (BQM with exact Ising/QUBO conversion, fast
-single-thread annealer, parallel restarts), Max-Cut and number
-partitioning with Gset benchmarks, the hybrid MAPF solver, rolling-horizon
-replanning with moving obstacles, and the interactive browser studio
-(Milestone 15) with a from-scratch CBS solver as the classical comparison,
-plus the performance benchmarks and dwave-neal comparison (Milestone 6).
-See `STATUS.md` for the per-milestone table.
+Complete. The project covers the full arc: the annealing library (BQM with
+exact Ising/QUBO conversion, fast single-thread annealer, parallel restarts,
+plus parallel tempering and multi-spin coding), Max-Cut and number
+partitioning with Gset benchmarks and a dwave-neal comparison, the hybrid
+MAPF solver with a from-scratch CBS baseline, rolling-horizon replanning with
+moving obstacles, and the interactive browser studio. See `STATUS.md` for the
+per-milestone table.
  
 ## Quickstart
  
