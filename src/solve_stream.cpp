@@ -31,6 +31,7 @@
 #include "mapf/grid.hpp"
 #include "mapf/rolling.hpp"
 #include "mapf/scenario.hpp"
+#include "mapf/solver.hpp"
 #include "mapf/verifier.hpp"
 
 using namespace mapf;
@@ -51,6 +52,11 @@ const char* args(int argc, char** argv, const char* flag, const char* fallback) 
     for (int i = 1; i + 1 < argc; ++i)
         if (std::strcmp(argv[i], flag) == 0) return argv[i + 1];
     return fallback;
+}
+bool has_flag(int argc, char** argv, const char* flag) {
+    for (int i = 1; i < argc; ++i)
+        if (std::strcmp(argv[i], flag) == 0) return true;
+    return false;
 }
 
 // Minimal JSON array-of-positions printers (no dependency).
@@ -112,6 +118,65 @@ int main(int argc, char** argv) {
         sum_optimal += tasks[a].optimal_distance;
     }
 
+    // Emit the meta line (grid + agents) up front so the browser can draw the
+    // initial state before any solving.
+    auto emit_meta = [&](const std::vector<Cell>& obs0) {
+        std::printf("{\"event\":\"meta\",\"grid\":{\"w\":%d,\"h\":%d,\"blocked\":[",
+                    grid.width(), grid.height());
+        bool first = true;
+        for (int y = 0; y < grid.height(); ++y)
+            for (int x = 0; x < grid.width(); ++x)
+                if (!grid.passable(x, y)) {
+                    std::printf("%s[%d,%d]", first ? "" : ",", x, y);
+                    first = false;
+                }
+        std::printf("]},\"solver\":\"hybrid\",\"agents\":[");
+        for (std::size_t a = 0; a < n; ++a)
+            std::printf("%s{\"sx\":%d,\"sy\":%d,\"gx\":%d,\"gy\":%d}", a ? "," : "", starts[a].x,
+                        starts[a].y, goals[a].x, goals[a].y);
+        std::printf("],\"obstacles\":[");
+        for (std::size_t o = 0; o < obs0.size(); ++o)
+            std::printf("%s[%d,%d]", o ? "," : "", obs0[o].x, obs0[o].y);
+        std::printf("]}\n");
+        std::fflush(stdout);
+    };
+
+    // Static mode: run the one-shot hybrid solver (solver.hpp), which resolves
+    // conflicts by iteratively growing a candidate menu and is near-optimal on
+    // static instances. The rolling driver below is for the live / moving-
+    // obstacle case, where it trades some optimality for continuous replanning
+    // under a deadline; using it for a static side-by-side against CBS would
+    // sell the hybrid short (it brakes all agents whenever a window will not
+    // clear, which inflates cost as density grows). The frontend animates the
+    // returned plan by playback, so agents still move on the canvas.
+    if (has_flag(argc, argv, "--static")) {
+        SolverConfig scfg;
+        scfg.sweeps = static_cast<std::size_t>(argl(argc, argv, "--sweeps", 2000));
+        scfg.replicas = static_cast<std::size_t>(argl(argc, argv, "--replicas", 8));
+        scfg.threads = static_cast<std::size_t>(argl(argc, argv, "--threads", 0));
+        scfg.candidates_per_agent = static_cast<std::size_t>(argl(argc, argv, "--candidates", 4));
+        scfg.max_iterations = static_cast<std::size_t>(argl(argc, argv, "--iters", 12));
+        scfg.seed = static_cast<std::uint64_t>(argl(argc, argv, "--seed", 1));
+
+        emit_meta({});
+        SolverResult r = solve_mapf(grid, tasks, scfg);
+        VerifyResult vr = verify(grid, tasks, r.plan);
+        std::printf(
+            "{\"event\":\"done\",\"success\":%s,\"steps\":%zu,\"cycles\":%zu,"
+            "\"sum_of_costs\":%.0f,\"sum_of_optimal\":%.0f,\"overhead_pct\":%.2f,"
+            "\"conflicts\":%zu,\"obstacle_hits\":0,\"wall_ms\":%.1f,\"paths\":[",
+            r.success ? "true" : "false", static_cast<std::size_t>(r.plan.makespan()), r.iterations,
+            vr.sum_of_costs, vr.sum_of_optimal, vr.overhead_percent(), vr.violations.size(),
+            r.wall_ms);
+        for (std::size_t a = 0; a < n; ++a) {
+            if (a) std::printf(",");
+            print_path(r.plan.paths[a]);
+        }
+        std::printf("],\"obstacle_paths\":[]}\n");
+        std::fflush(stdout);
+        return r.success ? 0 : 1;
+    }
+
     RollingConfig cfg;
     cfg.window = static_cast<std::size_t>(argl(argc, argv, "--window", 8));
     cfg.execute = static_cast<std::size_t>(argl(argc, argv, "--execute", 3));
@@ -149,24 +214,11 @@ int main(int argc, char** argv) {
     const ObstacleModel* obs_ptr = n_obs > 0 ? &obs : nullptr;
 
     // Emit the meta line up front so the browser can draw the initial state.
-    std::printf("{\"event\":\"meta\",\"grid\":{\"w\":%d,\"h\":%d,\"blocked\":[",
-                grid.width(), grid.height());
-    bool first = true;
-    for (int y = 0; y < grid.height(); ++y)
-        for (int x = 0; x < grid.width(); ++x)
-            if (!grid.passable(x, y)) {
-                std::printf("%s[%d,%d]", first ? "" : ",", x, y);
-                first = false;
-            }
-    std::printf("]},\"solver\":\"hybrid\",\"agents\":[");
-    for (std::size_t a = 0; a < n; ++a)
-        std::printf("%s{\"sx\":%d,\"sy\":%d,\"gx\":%d,\"gy\":%d}", a ? "," : "", starts[a].x,
-                    starts[a].y, goals[a].x, goals[a].y);
-    std::printf("],\"obstacles\":[");
-    for (std::size_t o = 0; o < obs.count(); ++o)
-        std::printf("%s[%d,%d]", o ? "," : "", obs.at(o, 0).x, obs.at(o, 0).y);
-    std::printf("]}\n");
-    std::fflush(stdout);
+    {
+        std::vector<Cell> obs0;
+        for (std::size_t o = 0; o < obs.count(); ++o) obs0.push_back(obs.at(o, 0));
+        emit_meta(obs0);
+    }
 
     // Running cost-so-far bookkeeping for a live overhead estimate: track the
     // last global timestep at which each agent was off its goal.

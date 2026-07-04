@@ -350,22 +350,27 @@ def start_solve(body):
         threading.Thread(target=run_cbs_job,
                          args=(job, cmd, plan_path, grid_meta, agents),
                          daemon=True).start()
-    else:  # hybrid rolling stream
+    else:  # hybrid
+        n_obs = clamp("obstacles", params.get("obstacles", 0), 0)
         cmd = [str(SOLVE_STREAM_BIN), str(map_p), str(scen_p), str(k),
                "--sweeps", str(clamp("sweeps", params.get("sweeps"), 4000)),
                "--replicas", str(clamp("replicas", params.get("replicas"), 8)),
                "--threads", str(clamp("threads", params.get("threads"), 4)),
-               "--window", str(clamp("window", params.get("window"), 8)),
-               "--execute", str(clamp("execute", params.get("execute"), 3)),
                "--candidates", str(clamp("candidates", params.get("candidates"), 5)),
-               "--deadline-ms", str(float(params.get("deadline_ms", 0) or 0)),
                "--seed", str(seed)]
-        if params.get("schedule") == "geometric" and params.get("alpha"):
-            pass  # solver defaults are geometric; alpha wired below if given
-        n_obs = clamp("obstacles", params.get("obstacles", 0), 0)
         if n_obs > 0:
-            cmd += ["--obstacles", str(n_obs),
+            # Moving obstacles: use the rolling-horizon driver, which streams a
+            # window per cycle and dodges obstacles under a deadline.
+            cmd += ["--window", str(clamp("window", params.get("window"), 8)),
+                    "--execute", str(clamp("execute", params.get("execute"), 3)),
+                    "--deadline-ms", str(float(params.get("deadline_ms", 0) or 0)),
+                    "--obstacles", str(n_obs),
                     "--motion", "random" if params.get("motion") == "random" else "scripted"]
+        else:
+            # Static instance: use the one-shot hybrid solver, which is
+            # near-optimal (a few percent over CBS) rather than the rolling
+            # driver's much larger overhead. The frontend animates the plan.
+            cmd += ["--static"]
         threading.Thread(target=run_ndjson_job, args=(job, cmd), daemon=True).start()
     return job.id
 
