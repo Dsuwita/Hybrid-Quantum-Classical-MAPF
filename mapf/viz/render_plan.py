@@ -51,12 +51,13 @@ def load_map(path):
 
 
 def load_plan(path):
-    """Return (map_name, paths, obstacles). Agent lines start with an
-    integer index; obstacle trajectory lines start with the word
-    'obstacle'."""
+    """Return (map_name, paths, obstacles, goals). Agent lines start with an
+    integer index; obstacle trajectory lines start with 'obstacle'; per-agent
+    goal-trajectory lines (lifelong mode) start with 'goal'."""
     map_name = None
     paths = []
     obstacles = []
+    goals = []
     with open(path) as f:
         for ln in f:
             ln = ln.strip()
@@ -69,14 +70,17 @@ def load_plan(path):
                 continue
             elif parts[0] == "obstacle":
                 obstacles.append([tuple(map(int, tok.split(","))) for tok in parts[1:]])
+            elif parts[0] == "goal":
+                # "goal <agent> x0,y0 x1,y1 ..."
+                goals.append([tuple(map(int, tok.split(","))) for tok in parts[2:]])
             else:
                 # "<agent> x0,y0 x1,y1 ..."
                 paths.append([tuple(map(int, tok.split(","))) for tok in parts[1:]])
-    return map_name, paths, obstacles
+    return map_name, paths, obstacles, goals
 
 
-def render(plan_file, map_path, out_path, fps, cell_px):
-    map_name, paths, obstacles = load_plan(plan_file)
+def render(plan_file, map_path, out_path, fps, cell_px, trail=6):
+    map_name, paths, obstacles, goals = load_plan(plan_file)
     if map_path is None:
         map_path = map_name
     width, height, blocked = load_map(map_path)
@@ -84,10 +88,15 @@ def render(plan_file, map_path, out_path, fps, cell_px):
     makespan = max(len(p) for p in paths) - 1
     n_agents = len(paths)
     colors = [colormaps["tab20"](i % 20) for i in range(n_agents)]
+    lifelong = len(goals) == n_agents  # goal-history present -> moving goals
 
     def pos(a, t):  # park on final cell after the path ends
         p = paths[a]
         return p[t] if t < len(p) else p[-1]
+
+    def goal_pos(a, t):  # current goal at time t (lifelong) or final cell
+        g = goals[a] if lifelong else paths[a]
+        return g[t] if t < len(g) else g[-1]
 
     def obs_pos(o, t):
         p = obstacles[o]
@@ -107,11 +116,20 @@ def render(plan_file, map_path, out_path, fps, cell_px):
     ax.set_ylim(height, 0)
     ax.set_aspect("equal")
 
-    # Static goal markers (X) in each agent's color.
+    # Goal markers (X) in each agent's color. In lifelong mode they move each
+    # frame to the agent's current goal; otherwise they are the fixed goals.
+    goal_scatter = ax.scatter(
+        [goal_pos(a, 0)[0] + 0.5 for a in range(n_agents)],
+        [goal_pos(a, 0)[1] + 0.5 for a in range(n_agents)],
+        c=colors, marker="x", s=(cell_px * 2), linewidths=2, zorder=2,
+    )
+
+    # Motion trails: one fading line per agent showing its last `trail` steps,
+    # which makes the continuous replanning read as motion rather than a jump.
+    trail_lines = []
     for a in range(n_agents):
-        gx, gy = paths[a][-1]
-        ax.plot(gx + 0.5, gy + 0.5, marker="x", color=colors[a], markersize=8,
-                markeredgewidth=2)
+        (ln,) = ax.plot([], [], color=colors[a], linewidth=2, alpha=0.5, zorder=1)
+        trail_lines.append(ln)
 
     # Moving obstacles: dark squares redrawn each frame (via a Rectangle
     # per obstacle whose position is updated in update()).
@@ -135,6 +153,12 @@ def render(plan_file, map_path, out_path, fps, cell_px):
         scatter.set_offsets(
             [[pos(a, t)[0] + 0.5, pos(a, t)[1] + 0.5] for a in range(n_agents)]
         )
+        goal_scatter.set_offsets(
+            [[goal_pos(a, t)[0] + 0.5, goal_pos(a, t)[1] + 0.5] for a in range(n_agents)]
+        )
+        for a in range(n_agents):
+            seg = [pos(a, tau) for tau in range(max(0, t - trail), t + 1)]
+            trail_lines[a].set_data([c[0] + 0.5 for c in seg], [c[1] + 0.5 for c in seg])
         for o, rect in enumerate(obstacle_patches):
             ox, oy = obs_pos(o, t)
             rect.set_xy((ox + 0.1, oy + 0.1))

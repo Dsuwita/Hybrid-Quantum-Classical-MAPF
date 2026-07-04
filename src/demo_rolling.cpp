@@ -19,6 +19,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <random>
 #include <string>
 #include <vector>
@@ -40,6 +41,29 @@ const char* argv_str(int argc, char** argv, const char* flag, const char* fallba
     for (int i = 1; i + 1 < argc; ++i)
         if (std::strcmp(argv[i], flag) == 0) return argv[i + 1];
     return fallback;
+}
+
+// Plan file with per-timestep goal trajectory lines appended ("goal <a>
+// x,y ..."), so the renderer can draw each agent's CURRENT goal as it jumps
+// on arrival -- the visible signature of lifelong replanning.
+bool write_plan_with_goals(const std::string& path, const std::string& map_name,
+                           const RollingResult& res) {
+    std::ofstream out(path);
+    if (!out) return false;
+    const Plan& plan = res.history;
+    out << "# mapf plan\nmap " << map_name << "\nagents " << plan.num_agents() << "\nmakespan "
+        << plan.makespan() << "\n";
+    for (std::size_t a = 0; a < plan.num_agents(); ++a) {
+        out << a;
+        for (const Cell& c : plan.paths[a]) out << " " << c.x << "," << c.y;
+        out << "\n";
+    }
+    for (std::size_t a = 0; a < res.goal_history.size(); ++a) {
+        out << "goal " << a;
+        for (const Cell& c : res.goal_history[a]) out << " " << c.x << "," << c.y;
+        out << "\n";
+    }
+    return true;
 }
 }  // namespace
 
@@ -108,7 +132,7 @@ int main(int argc, char** argv) {
 
     const char* out_path = argv_str(argc, argv, "--out", nullptr);
     if (out_path) {
-        if (write_plan(out_path, map_path, res.history))
+        if (write_plan_with_goals(out_path, map_path, res))
             std::printf("plan written     %s\n", out_path);
     }
     return vr.ok() ? 0 : 1;

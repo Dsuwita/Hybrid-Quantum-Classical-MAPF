@@ -52,6 +52,13 @@ def room_map(w, h):
     return b
 
 
+def warehouse_map(w, h):
+    """Grid of 2x2 shelf blocks separated by one-cell aisles: the RHCR
+    robot-warehouse layout. A cell is a shelf (blocked) unless it is on an
+    aisle line (x or y divisible by 3), so agents weave through the aisles."""
+    return [[(x % 3 != 0) and (y % 3 != 0) for x in range(w)] for y in range(h)]
+
+
 def random_map(w, h, density, seed):
     rng = random.Random(seed)
     while True:
@@ -119,14 +126,16 @@ def write_scenario(name, w, h, blocked, n_agents, seed):
 def main():
     W = H = 32
     specs = [
-        ("empty-32-32", empty_map(W, H)),
-        ("room-32-32", room_map(W, H)),
-        ("random-32-32", random_map(W, H, 0.12, seed=7)),
+        ("empty-32-32", W, H, empty_map(W, H)),
+        ("room-32-32", W, H, room_map(W, H)),
+        ("random-32-32", W, H, random_map(W, H, 0.12, seed=7)),
+        # 34x22 so the last row/column land on aisle lines (open border).
+        ("warehouse-34-22", 34, 22, warehouse_map(34, 22)),
     ]
-    for name, blocked in specs:
-        write_map(name, W, H, blocked)
-        made = write_scenario(name, W, H, blocked, n_agents=40, seed=hash(name) & 0xFFFF)
-        print(f"{name}: map {W}x{H}, scenario with {made} agents")
+    for name, w, h, blocked in specs:
+        write_map(name, w, h, blocked)
+        made = write_scenario(name, w, h, blocked, n_agents=40, seed=hash(name) & 0xFFFF)
+        print(f"{name}: map {w}x{h}, scenario with {made} agents")
 
 
 if __name__ == "__main__":

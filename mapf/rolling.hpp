@@ -65,6 +65,10 @@ struct RollingConfig {
 
 struct RollingResult {
     Plan history;                 // execution history: history.paths[a][t]
+    // Goal each agent was heading toward at each timestep. In lifelong mode
+    // the goal jumps when an agent arrives, so this lets a viewer see the new
+    // task appear and the agent re-route (the point of real-time replanning).
+    std::vector<std::vector<Cell>> goal_history;  // goal_history[a][t]
     std::size_t steps = 0;        // global timesteps simulated
     std::size_t cycles = 0;       // replan cycles run (for cycle-time metrics)
     std::size_t goals_reached = 0;
@@ -183,10 +187,14 @@ inline RollingResult simulate_rolling(const Grid& grid, const std::vector<Cell>&
 
     RollingResult result;
     result.history.paths.resize(n);
+    result.goal_history.resize(n);
     std::vector<Cell> cur = starts;
     std::vector<Cell> goals = goals_in;
     std::vector<bool> done(n, false);  // one-shot: reached goal and staying
-    for (std::size_t a = 0; a < n; ++a) result.history.paths[a].push_back(starts[a]);
+    for (std::size_t a = 0; a < n; ++a) {
+        result.history.paths[a].push_back(starts[a]);
+        result.goal_history[a].push_back(goals[a]);
+    }
 
     std::mt19937_64 rng(cfg.seed);
     std::size_t cycle = 0;
@@ -262,6 +270,7 @@ inline RollingResult simulate_rolling(const Grid& grid, const std::vector<Cell>&
             if (!detail::step_ok(prev, next)) break;  // residual agent-agent conflict
             for (std::size_t a = 0; a < n; ++a) {
                 result.history.paths[a].push_back(next[a]);
+                result.goal_history[a].push_back(goals[a]);
                 // Count an overlap only an obstacle could still cause (it
                 // moved onto a braked/held agent). Zero under perfect
                 // prediction; a metric of prediction quality otherwise.
@@ -279,6 +288,7 @@ inline RollingResult simulate_rolling(const Grid& grid, const std::vector<Cell>&
             // clock still advances.
             for (std::size_t a = 0; a < n; ++a) {
                 result.history.paths[a].push_back(cur[a]);
+                result.goal_history[a].push_back(goals[a]);
                 if (obstacles && obstacles->count() > 0 &&
                     detail::obstacle_on(*obstacles, clock + 1, cur[a])) {
                     result.obstacle_hits += 1;
