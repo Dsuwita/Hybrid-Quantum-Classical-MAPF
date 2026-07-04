@@ -249,15 +249,21 @@ one, so the agents never stop.
 The committed history is always collision-free (each cycle commits only
 the longest conflict-free prefix it verified, and falls back to holding
 position if even the first step would collide); throughput is what
-degrades under congestion, and it is reported honestly. This GIF is eight
-agents running lifelong on a 16x16 grid, produced by `demo_rolling`:
+degrades under congestion, and it is reported honestly. The GIF below is 18
+agents running lifelong in a warehouse (2x2 shelf blocks with one-cell
+aisles, the RHCR robot-warehouse layout), produced by `demo_rolling`. Each
+agent is a colored dot with a trail; the matching X is its current goal,
+which jumps to a new task the instant the agent arrives, so you can watch
+agents re-route in real time as their goals change:
 
 ```
-./build/demo_rolling mapf/bench/maps/empty16.map 8 --steps 80 --out plan.txt
-python3 mapf/viz/render_plan.py plan.txt --out lifelong.gif
+./build/demo_rolling data/maps/warehouse-34-22.map 18 --steps 130 --window 10 \
+  --execute 3 --deadline 25 --seed 3 --out lifelong.plan
+python3 mapf/viz/render_plan.py lifelong.plan --map data/maps/warehouse-34-22.map \
+  --out lifelong.gif --fps 6
 ```
 
-![eight agents replanning continuously in lifelong mode](mapf/viz/demo_lifelong.gif)
+![18 agents replanning continuously in a warehouse, goals reassigned on arrival](mapf/viz/demo_lifelong.gif)
 
 ### Moving obstacles
 
