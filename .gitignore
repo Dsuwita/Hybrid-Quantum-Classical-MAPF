@@ -5,3 +5,4 @@ test_bqm
 test_annealer
 demo_partition
 __pycache__/
+STATUS.md

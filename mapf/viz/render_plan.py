@@ -131,6 +131,16 @@ def render(plan_file, map_path, out_path, fps, cell_px, trail=6):
         (ln,) = ax.plot([], [], color=colors[a], linewidth=2, alpha=0.5, zorder=1)
         trail_lines.append(ln)
 
+    # Leash lines: a dashed line from each agent to its CURRENT goal. When a
+    # goal is reassigned (lifelong mode), the leash snaps to the new target,
+    # so the real-time replanning is obvious even between the rarer arrivals.
+    leash_lines = []
+    if lifelong:
+        for a in range(n_agents):
+            (ln,) = ax.plot([], [], color=colors[a], linewidth=1, alpha=0.35,
+                            linestyle="--", zorder=1)
+            leash_lines.append(ln)
+
     # Moving obstacles: dark squares redrawn each frame (via a Rectangle
     # per obstacle whose position is updated in update()).
     from matplotlib.patches import Rectangle
@@ -159,6 +169,10 @@ def render(plan_file, map_path, out_path, fps, cell_px, trail=6):
         for a in range(n_agents):
             seg = [pos(a, tau) for tau in range(max(0, t - trail), t + 1)]
             trail_lines[a].set_data([c[0] + 0.5 for c in seg], [c[1] + 0.5 for c in seg])
+        for a in range(len(leash_lines)):
+            px, py = pos(a, t)
+            gx, gy = goal_pos(a, t)
+            leash_lines[a].set_data([px + 0.5, gx + 0.5], [py + 0.5, gy + 0.5])
         for o, rect in enumerate(obstacle_patches):
             ox, oy = obs_pos(o, t)
             rect.set_xy((ox + 0.1, oy + 0.1))

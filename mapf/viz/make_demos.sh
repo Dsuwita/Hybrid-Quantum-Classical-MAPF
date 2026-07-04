@@ -26,7 +26,7 @@ echo "Solving rooms demo..."
   --sweeps 4000 --replicas 12 --out mapf/viz/demo_rooms.plan
 
 echo "Solving lifelong warehouse demo (real-time replanning)..."
-build/demo_rolling data/maps/warehouse-34-22.map 18 --steps 130 --window 10 \
+build/demo_rolling data/maps/warehouse-34-22.map 16 --steps 120 --window 10 \
   --execute 3 --deadline 25 --seed 3 --out mapf/viz/demo_lifelong.plan
 
 echo "Rendering GIFs (needs matplotlib + pillow)..."
